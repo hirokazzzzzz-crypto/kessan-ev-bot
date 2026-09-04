@@ -1,35 +1,35 @@
 from pretrade import signals
 
 
-def _stmt(disclosed_date, **overrides):
+def _stmt(disc_date, **overrides):
     base = {
-        "DisclosedDate": disclosed_date,
-        "DisclosedTime": "09:00:00",
-        "TypeOfCurrentPeriod": "FY",
-        "NetSales": "1000",
-        "OperatingProfit": "100",
-        "OrdinaryProfit": "100",
-        "Profit": "70",
-        "ForecastNetSales": "1000",
-        "ForecastOperatingProfit": "100",
-        "ForecastOrdinaryProfit": "100",
-        "ForecastProfit": "70",
-        "EarningsPerShare": "50",
-        "ForecastEarningsPerShare": "55",
-        "BookValuePerShare": "1200",
+        "DiscDate": disc_date,
+        "DiscTime": "09:00:00",
+        "CurPerType": "FY",
+        "Sales": "1000",
+        "OP": "100",
+        "OdP": "100",
+        "NP": "70",
+        "FSales": "1000",
+        "FOP": "100",
+        "FOdP": "100",
+        "FNP": "70",
+        "EPS": "50",
+        "FEPS": "55",
+        "BPS": "1200",
     }
     base.update(overrides)
     return base
 
 
 def _quote(d, close, volume=1_000_000):
-    return {"Date": d, "Close": str(close), "Volume": str(volume)}
+    return {"Date": d, "C": str(close), "Vo": str(volume)}
 
 
 def test_detect_earnings_beat_true_when_actual_exceeds_prior_forecast():
     stmts = [
-        _stmt("2026-05-01", ForecastProfit="70"),
-        _stmt("2026-08-01", Profit="120", ForecastProfit="70"),
+        _stmt("2026-05-01", FNP="70"),
+        _stmt("2026-08-01", NP="120", FNP="70"),
     ]
     beat, reason = signals.detect_earnings_beat_or_upward_revision(stmts)
     assert beat is True
@@ -43,8 +43,8 @@ def test_detect_earnings_beat_false_when_no_prior_statement():
 
 def test_detect_upward_revision_true_when_forecast_raised():
     stmts = [
-        _stmt("2026-05-01", ForecastProfit="70"),
-        _stmt("2026-07-01", Profit="70", ForecastProfit="90"),
+        _stmt("2026-05-01", FNP="70"),
+        _stmt("2026-07-01", NP="70", FNP="90"),
     ]
     beat, reason = signals.detect_earnings_beat_or_upward_revision(stmts)
     assert beat is True
@@ -56,7 +56,7 @@ def test_compute_pbr_and_per():
     pbr = signals.compute_pbr(stmt, price=1000)
     per = signals.compute_per(stmt, price=1000)
     assert pbr == 1000 / 1200
-    assert per == 1000 / 55  # ForecastEarningsPerShare優先
+    assert per == 1000 / 55  # FEPS(予想EPS)優先
 
 
 def test_is_pbr_under_1_and_is_per_cheap():

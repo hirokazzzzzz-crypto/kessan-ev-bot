@@ -5,13 +5,13 @@ from pretrade.fetch_cache import fetch_and_cache, load_cache
 
 class _FakeClient:
     def get_topix(self, from_date, to_date):
-        return [{"Date": from_date, "Close": "2000"}, {"Date": to_date, "Close": "2100"}]
+        return [{"Date": from_date, "C": "2000"}, {"Date": to_date, "C": "2100"}]
 
     def get_statements(self, code=None, date=None):
-        return [{"LocalCode": code, "DisclosedDate": "2026-05-01"}]
+        return [{"Code": code, "DiscDate": "2026-05-01"}]
 
     def get_daily_quotes(self, code, from_date, to_date):
-        return [{"Date": from_date, "Code": code, "Close": "1000"}]
+        return [{"Date": from_date, "Code": code, "C": "1000"}]
 
 
 def test_fetch_and_cache_writes_expected_structure(tmp_path):
@@ -23,7 +23,7 @@ def test_fetch_and_cache_writes_expected_structure(tmp_path):
     assert path == out_path
     data = json.loads(out_path.read_text(encoding="utf-8"))
     assert set(data["tickers"].keys()) == {"7203", "9984"}
-    assert data["tickers"]["7203"]["statements"][0]["LocalCode"] == "7203"
+    assert data["tickers"]["7203"]["statements"][0]["Code"] == "7203"
     assert len(data["topix"]) == 2
 
 

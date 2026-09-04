@@ -7,23 +7,23 @@ from pretrade.screener import (
 )
 
 
-def _q1_statement(disclosed_date="2026-05-01", operating_profit=35, forecast_operating_profit=100,
+def _q1_statement(disc_date="2026-05-01", operating_profit=35, forecast_operating_profit=100,
                    profit=25, ordinary_profit=30):
     return {
-        "DisclosedDate": disclosed_date,
-        "DisclosedTime": "09:00:00",
-        "TypeOfCurrentPeriod": "1Q",
-        "OperatingProfit": str(operating_profit),
-        "ForecastOperatingProfit": str(forecast_operating_profit),
-        "Profit": str(profit),
-        "OrdinaryProfit": str(ordinary_profit),
+        "DiscDate": disc_date,
+        "DiscTime": "09:00:00",
+        "CurPerType": "1Q",
+        "OP": str(operating_profit),
+        "FOP": str(forecast_operating_profit),
+        "NP": str(profit),
+        "OdP": str(ordinary_profit),
     }
 
 
 def _quotes(pre_date, pre_close, latest_date, latest_close):
     return [
-        {"Date": pre_date, "Close": str(pre_close)},
-        {"Date": latest_date, "Close": str(latest_close)},
+        {"Date": pre_date, "C": str(pre_close)},
+        {"Date": latest_date, "C": str(latest_close)},
     ]
 
 

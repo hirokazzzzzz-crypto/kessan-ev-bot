@@ -4,29 +4,29 @@ from pretrade.scan import build_score_inputs
 def _statements():
     return [
         {
-            "DisclosedDate": "2026-05-01",
-            "DisclosedTime": "09:00:00",
-            "Profit": "70",
-            "OperatingProfit": "100",
-            "ForecastProfit": "70",
-            "ForecastOperatingProfit": "100",
+            "DiscDate": "2026-05-01",
+            "DiscTime": "09:00:00",
+            "NP": "70",
+            "OP": "100",
+            "FNP": "70",
+            "FOP": "100",
         },
         {
-            "DisclosedDate": "2026-08-01",
-            "DisclosedTime": "09:00:00",
-            "Profit": "150",
-            "OperatingProfit": "180",
-            "ForecastProfit": "70",
-            "ForecastOperatingProfit": "100",
-            "BookValuePerShare": "1200",
-            "ForecastEarningsPerShare": "60",
+            "DiscDate": "2026-08-01",
+            "DiscTime": "09:00:00",
+            "NP": "150",
+            "OP": "180",
+            "FNP": "70",
+            "FOP": "100",
+            "BPS": "1200",
+            "FEPS": "60",
         },
     ]
 
 
 def _quotes():
-    quotes = [{"Date": f"2026-06-{d:02d}", "Close": "1000", "Volume": "100"} for d in range(1, 21)]
-    quotes.append({"Date": "2026-06-21", "Close": "1000", "Volume": "500"})
+    quotes = [{"Date": f"2026-06-{d:02d}", "C": "1000", "Vo": "100"} for d in range(1, 21)]
+    quotes.append({"Date": "2026-06-21", "C": "1000", "Vo": "500"})
     return quotes
 
 

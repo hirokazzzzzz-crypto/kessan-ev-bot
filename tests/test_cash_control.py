@@ -19,7 +19,7 @@ class _Thesis:
 
 
 def _quotes(closes):
-    return [{"Date": f"2026-01-{i+1:02d}", "Close": str(c)} for i, c in enumerate(closes)]
+    return [{"Date": f"2026-01-{i+1:02d}", "C": str(c)} for i, c in enumerate(closes)]
 
 
 def test_moving_average_deviation():

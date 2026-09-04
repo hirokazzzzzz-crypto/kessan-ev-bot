@@ -58,13 +58,12 @@ J-Quants API V2から財務情報・株価四本値・TOPIXを取得し、銘柄
 
 ### 認証情報の設定
 
-環境変数でJ-Quantsの認証情報を設定する(いずれか一方)。
+J-Quantsダッシュボード(設定 » API キー)で発行したAPIキーを環境変数に設定する。
+V2 APIはAPIキーをそのまま `x-api-key` ヘッダーに使うシンプルな方式で、
+V1のようなリフレッシュトークン/IDトークンの交換は不要。
 
 ```bash
-export JQUANTS_REFRESH_TOKEN="..."
-# または
-export JQUANTS_MAILADDRESS="..."
-export JQUANTS_PASSWORD="..."
+export JQUANTS_API_KEY="..."
 ```
 
 ### 使い方(CLI)
