@@ -89,24 +89,63 @@ python main.py screen
 J-Quants APIの生データ形式の辞書を受け取る純粋関数として実装されており、ネットワークアクセスを
 含まないため、実際のAPIキーがなくても単体テストで検証できる。
 
+## Phase 3: 年間シーズナリティ・市場イベントカレンダー(2-1)+現金比率コントロール(2-4)
+
+過去データの季節性分析と手動メモを組み合わせたカレンダー機能、および保有ポジションと相場全体の
+状況から利確・損切り・押し目買いのタイミングをアラートする現金比率コントロール機能を追加した。
+
+### 使い方(CLI)
+
+```bash
+# シーズナリティメモの登録(自由記述+タグ付け)
+python main.py memo-add --month 3 --day 28 --note "配当権利落ちで下げやすい" --tags 権利落ち,3月
+
+# メモの一覧・タグ絞り込み
+python main.py memo-list --tag 権利落ち
+
+# 今の時期に近いメモを表示(翌年以降も同時期が近づくたびにヒットする自動リマインド)
+python main.py memo-due --window 7
+
+# データ側の季節性分析(月次騰落率統計・決算集中期・四半期末リバランス・権利落ち日の目安)
+python main.py seasonality --year 2026
+
+# 現金比率コントロール: 利確検討リスト/損切り後押し/暴落時の仕込み提示
+python main.py cash-check
+```
+
+`memo-due` と `cash-check` は、環境変数 `SLACK_WEBHOOK_URL` が設定されていれば同じ内容をSlackにも
+通知する(未設定時はCLI出力のみでスキップされる)。
+
+`seasonality`/`cash-check` は `fetch-data` で作成したキャッシュファイル(既定 `data/market_cache.json`)
+を読み込んで動作する。`cash-check` はPhase 1の保有中トレード仮説(SQLite)とPhase 2のスコアリング結果を
+組み合わせ、以下の基準でアラートする:
+
+- 移動平均(既定25日)乖離+8%超、または含み益+20%超 -> 「利確検討」
+- 保有銘柄の現在値が損切り価格を割れている -> 「損切り」
+- TOPIXが移動平均から-10%超下方乖離 -> 「暴落仕込み」(待機資金投入+スコア上位銘柄を提示)
+
 ### ディレクトリ構成
 
 ```
 pretrade/
-  db.py            SQLiteスキーマ・接続管理
-  rr.py            リスクリワード比の自動計算
-  models.py        トレード仮説のデータモデル・登録/決済ロジック
-  report.py        月次レポート(仮説vs結果、根拠別勝率集計)
-  csv_export.py    既存ポジション管理CSVと連携するための書き出し
-  jquants_client.py  J-Quants API V2の認証・データ取得ラッパー
-  signals.py       財務・株価データから選定基準シグナルを導出する純粋関数群
-  scoring.py       銘柄選定基準スコアリング(2-2)
-  screener.py      「未認識の好進捗」スクリーナー(2-0)
-  scan.py          J-Quantsデータ -> ScoreInputs の変換
-  fetch_cache.py    J-Quants APIの取得結果をローカルJSONにキャッシュ
-  cli.py           CLIエントリポイント
-main.py            CLI簡易起動スクリプト
-tests/             pytestテスト一式
+  db.py                   SQLiteスキーマ・接続管理
+  rr.py                   リスクリワード比の自動計算
+  models.py                トレード仮説のデータモデル・登録/決済ロジック
+  report.py                月次レポート(仮説vs結果、根拠別勝率集計)
+  csv_export.py            既存ポジション管理CSVと連携するための書き出し
+  jquants_client.py        J-Quants API V2の認証・データ取得ラッパー
+  signals.py               財務・株価データから選定基準シグナルを導出する純粋関数群
+  scoring.py                銘柄選定基準スコアリング(2-2)
+  screener.py               「未認識の好進捗」スクリーナー(2-0)
+  scan.py                   J-Quantsデータ -> ScoreInputs の変換
+  fetch_cache.py            J-Quants APIの取得結果をローカルJSONにキャッシュ
+  calendar_seasonality.py  年間シーズナリティ・市場イベントカレンダー データ分析側(2-1)
+  calendar_memos.py         シーズナリティ手動メモ+自動リマインド(2-1)
+  cash_control.py           現金比率コントロール(2-4)
+  slack_notify.py           Slack Webhook通知
+  cli.py                    CLIエントリポイント
+main.py                     CLI簡易起動スクリプト
+tests/                      pytestテスト一式
 ```
 
 ### テスト
@@ -117,7 +156,6 @@ python -m pytest
 
 ## 今後のフェーズ
 
-- Phase 3: 年間シーズナリティ・市場イベントカレンダー(2-1)、現金比率コントロール(2-4)
 - Phase 4: Streamlit/HTMLダッシュボードへの統合
 
 詳細は仕様書を参照。

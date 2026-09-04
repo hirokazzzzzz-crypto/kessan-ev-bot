@@ -40,6 +40,15 @@ CREATE TABLE IF NOT EXISTS trade_theses (
     reflection TEXT,
     pnl_pct REAL
 );
+
+CREATE TABLE IF NOT EXISTS calendar_memos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    event_month INTEGER NOT NULL,
+    event_day INTEGER NOT NULL,
+    tags TEXT NOT NULL DEFAULT '',
+    note TEXT NOT NULL
+);
 """
 
 

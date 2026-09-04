@@ -10,9 +10,14 @@
     python -m pretrade.cli fetch-data --codes 7203,9984 --from 2026-01-01 --to 2026-09-01
     python -m pretrade.cli score --ticker 7203
     python -m pretrade.cli screen
+    python -m pretrade.cli memo-add --month 3 --day 28 --note "配当権利落ちで下げやすい" --tags 権利落ち,3月
+    python -m pretrade.cli memo-due
+    python -m pretrade.cli seasonality
+    python -m pretrade.cli cash-check
 """
 import argparse
 import sys
+from datetime import date
 
 from .db import get_connection, RATIONALE_CATEGORIES, EXIT_REASONS, AS_EXPECTED_CHOICES
 from .rr import calculate_rr, RR_WARNING_THRESHOLD
@@ -23,6 +28,21 @@ from .fetch_cache import fetch_and_cache, load_cache
 from .scan import build_score_inputs
 from .scoring import score_stock, format_score_result
 from .screener import find_unrecognized_progress, DEFAULT_PROGRESS_THRESHOLD, DEFAULT_REACTION_THRESHOLD
+from .calendar_memos import add_memo, list_memos, due_memos
+from .calendar_seasonality import (
+    monthly_return_stats,
+    earnings_concentration_by_month,
+    estimate_ex_rights_dates,
+    quarter_end_rebalance_dates,
+)
+from .cash_control import (
+    check_take_profit_candidates,
+    check_stop_loss_breaches,
+    check_crash_buy_opportunity,
+    moving_average_deviation,
+)
+from .slack_notify import send_slack_message
+from . import signals
 
 
 def _prompt(label, cast=str, choices=None):
@@ -192,6 +212,110 @@ def cmd_screen(args):
     return 0
 
 
+def cmd_memo_add(args):
+    conn = get_connection(args.db)
+    tags = [t.strip() for t in args.tags.split(",")] if args.tags else []
+    memo = add_memo(conn, event_month=args.month, event_day=args.day, note=args.note, tags=tags)
+    print(f"登録しました: id={memo.id} {memo.event_month}/{memo.event_day} タグ=[{memo.tags}]")
+    return 0
+
+
+def cmd_memo_list(args):
+    conn = get_connection(args.db)
+    memos = list_memos(conn, tag=args.tag)
+    if not memos:
+        print("登録されているメモはありません。")
+        return 0
+    for m in memos:
+        print(f"#{m.id} {m.event_month}/{m.event_day} [{m.tags}] {m.note}")
+    return 0
+
+
+def cmd_memo_due(args):
+    conn = get_connection(args.db)
+    memos = due_memos(conn, window_days=args.window)
+    if not memos:
+        print("直近のシーズナリティメモはありません。")
+        return 0
+    for m in memos:
+        text = f"[シーズナリティリマインド] {m.event_month}/{m.event_day} [{m.tags}] {m.note}"
+        print(text)
+        send_slack_message(text)
+    return 0
+
+
+def cmd_seasonality(args):
+    cache = load_cache(args.cache)
+    topix = cache.get("topix", [])
+    tickers = cache.get("tickers", {})
+
+    print("--- 月次騰落率統計(TOPIX) ---")
+    monthly = monthly_return_stats(topix)
+    for month in sorted(monthly.keys()):
+        s = monthly[month]
+        print(
+            f"  {month:2d}月: 平均{s['avg_return_pct']:+.2f}% "
+            f"勝率{s['win_rate_pct']:.0f}% (n={s['n']})"
+        )
+
+    print("--- 決算集中期(開示件数/月) ---")
+    earnings = earnings_concentration_by_month(tickers)
+    for month in sorted(earnings.keys()):
+        print(f"  {month:2d}月: {earnings[month]}件")
+
+    print(f"--- {args.year}年 四半期末リバランス時期 ---")
+    for d in quarter_end_rebalance_dates(args.year):
+        print(f"  {d}")
+
+    ex_rights = estimate_ex_rights_dates(tickers)
+    if ex_rights:
+        print("--- 権利落ち日の目安(近似値) ---")
+        for ticker, d in ex_rights.items():
+            print(f"  {ticker}: {d}")
+
+    return 0
+
+
+def cmd_cash_check(args):
+    conn = get_connection(args.db)
+    open_theses = list_open(conn)
+    cache = load_cache(args.cache)
+    tickers = cache.get("tickers", {})
+
+    latest_prices = {}
+    ma_deviations = {}
+    for thesis in open_theses:
+        data = tickers.get(thesis.ticker)
+        if not data:
+            continue
+        quotes = data.get("quotes", [])
+        closes = signals.close_series(quotes)
+        if closes and closes[-1] is not None:
+            latest_prices[thesis.ticker] = closes[-1]
+        ma_deviations[thesis.ticker] = moving_average_deviation(quotes)
+
+    alerts = check_take_profit_candidates(open_theses, latest_prices, ma_deviations)
+    alerts += check_stop_loss_breaches(open_theses, latest_prices)
+
+    score_results = [
+        score_stock(build_score_inputs(ticker, data.get("statements", []), data.get("quotes", [])))
+        for ticker, data in tickers.items()
+    ]
+    crash_alert = check_crash_buy_opportunity(cache.get("topix", []), score_results)
+    if crash_alert:
+        alerts.append(crash_alert)
+
+    if not alerts:
+        print("現時点でアラートはありません。")
+        return 0
+
+    for a in alerts:
+        text = f"[{a.alert_type}] {a.message}"
+        print(text)
+        send_slack_message(text)
+    return 0
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="売買前チェックシステム(アルファ明確化ゲート)")
     parser.add_argument("--db", default=None, help="SQLiteファイルのパス(省略時は data/pretrade.db)")
@@ -244,6 +368,30 @@ def build_parser():
     p_screen.add_argument("--progress-threshold", type=float, default=DEFAULT_PROGRESS_THRESHOLD)
     p_screen.add_argument("--reaction-threshold", type=float, default=DEFAULT_REACTION_THRESHOLD)
     p_screen.set_defaults(func=cmd_screen)
+
+    p_memo_add = sub.add_parser("memo-add", help="シーズナリティ・市場イベントの手動メモを登録(2-1)")
+    p_memo_add.add_argument("--month", type=int, required=True, help="1〜12")
+    p_memo_add.add_argument("--day", type=int, required=True, help="1〜31")
+    p_memo_add.add_argument("--note", required=True)
+    p_memo_add.add_argument("--tags", default=None, help="カンマ区切りのタグ")
+    p_memo_add.set_defaults(func=cmd_memo_add)
+
+    p_memo_list = sub.add_parser("memo-list", help="シーズナリティメモの一覧")
+    p_memo_list.add_argument("--tag", default=None)
+    p_memo_list.set_defaults(func=cmd_memo_list)
+
+    p_memo_due = sub.add_parser("memo-due", help="今の時期に近いシーズナリティメモを表示(自動リマインド)")
+    p_memo_due.add_argument("--window", type=int, default=7, help="前後何日以内を対象にするか")
+    p_memo_due.set_defaults(func=cmd_memo_due)
+
+    p_seasonality = sub.add_parser("seasonality", help="年間シーズナリティ・市場イベントカレンダー(2-1)")
+    p_seasonality.add_argument("--cache", default=None, help="キャッシュファイル(省略時は data/market_cache.json)")
+    p_seasonality.add_argument("--year", type=int, default=date.today().year)
+    p_seasonality.set_defaults(func=cmd_seasonality)
+
+    p_cash = sub.add_parser("cash-check", help="現金比率コントロール: 利確検討/損切り/暴落仕込みアラート(2-4)")
+    p_cash.add_argument("--cache", default=None, help="キャッシュファイル(省略時は data/market_cache.json)")
+    p_cash.set_defaults(func=cmd_cash_check)
 
     return parser
 

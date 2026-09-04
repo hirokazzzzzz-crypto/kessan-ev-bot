@@ -120,7 +120,7 @@ def is_volume_surge(quotes: list, window: int = 20, multiple: float = 2.0) -> bo
 
 # -- トレンド転換 (+1) ---------------------------------------------------
 
-def _close_series(quotes: list) -> list:
+def close_series(quotes: list) -> list:
     sorted_quotes = sort_quotes(quotes)
     closes = []
     for q in sorted_quotes:
@@ -133,7 +133,7 @@ def _close_series(quotes: list) -> list:
 
 def detect_trend_reversal(quotes: list, short_window: int = 5, long_window: int = 25) -> bool:
     """短期移動平均が長期移動平均を直近日に上抜けた(ゴールデンクロス)かを判定する。"""
-    closes = _close_series(quotes)
+    closes = close_series(quotes)
     if len(closes) < long_window + 1:
         return False
 
