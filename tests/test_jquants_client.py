@@ -16,60 +16,81 @@ class _FakeResponse:
         return self._payload
 
 
-def test_missing_credentials_raises_auth_error(monkeypatch):
-    monkeypatch.delenv("JQUANTS_REFRESH_TOKEN", raising=False)
-    monkeypatch.delenv("JQUANTS_MAILADDRESS", raising=False)
-    monkeypatch.delenv("JQUANTS_PASSWORD", raising=False)
+def test_missing_api_key_raises_auth_error(monkeypatch):
+    monkeypatch.delenv("JQUANTS_API_KEY", raising=False)
 
     client = JQuantsClient()
     with pytest.raises(JQuantsAuthError):
-        client._ensure_id_token()
+        client.get_statements(code="7203")
 
 
-def test_get_statements_uses_refresh_token_and_returns_list(monkeypatch):
-    client = JQuantsClient(refresh_token="dummy-refresh-token")
-
+def test_get_statements_sends_api_key_header_and_returns_data(monkeypatch):
+    client = JQuantsClient(api_key="dummy-api-key")
     calls = []
 
-    def fake_post(url, params=None, json=None, timeout=None):
-        calls.append((url, params, json))
-        assert "auth_refresh" in url
-        return _FakeResponse({"idToken": "dummy-id-token"})
-
     def fake_get(url, headers=None, params=None, timeout=None):
-        assert headers["Authorization"] == "Bearer dummy-id-token"
+        calls.append((url, headers, params))
+        assert url == "https://api.jquants.com/v2/fins/summary"
+        assert headers["x-api-key"] == "dummy-api-key"
         assert params["code"] == "7203"
-        return _FakeResponse({"statements": [{"LocalCode": "7203"}]})
+        return _FakeResponse({"data": [{"Code": "7203"}]})
 
-    monkeypatch.setattr("pretrade.jquants_client.requests.post", fake_post)
     monkeypatch.setattr("pretrade.jquants_client.requests.get", fake_get)
 
     result = client.get_statements(code="7203")
-    assert result == [{"LocalCode": "7203"}]
+    assert result == [{"Code": "7203"}]
     assert len(calls) == 1
 
 
 def test_get_statements_requires_code_or_date():
-    client = JQuantsClient(refresh_token="dummy")
+    client = JQuantsClient(api_key="dummy")
     with pytest.raises(ValueError):
         client.get_statements()
 
 
-def test_id_token_is_cached_across_calls(monkeypatch):
-    client = JQuantsClient(refresh_token="dummy-refresh-token")
-    post_calls = []
-
-    def fake_post(url, params=None, json=None, timeout=None):
-        post_calls.append(url)
-        return _FakeResponse({"idToken": "dummy-id-token"})
+def test_get_daily_quotes_uses_correct_endpoint_and_params(monkeypatch):
+    client = JQuantsClient(api_key="dummy")
 
     def fake_get(url, headers=None, params=None, timeout=None):
-        return _FakeResponse({"daily_quotes": []})
+        assert url == "https://api.jquants.com/v2/equities/bars/daily"
+        assert params == {"code": "7203", "from": "2026-01-01", "to": "2026-01-31"}
+        return _FakeResponse({"data": [{"Date": "2026-01-05", "Code": "7203", "C": 1000}]})
 
-    monkeypatch.setattr("pretrade.jquants_client.requests.post", fake_post)
     monkeypatch.setattr("pretrade.jquants_client.requests.get", fake_get)
 
-    client.get_daily_quotes("7203", "2026-01-01", "2026-01-31")
-    client.get_daily_quotes("7203", "2026-02-01", "2026-02-28")
+    result = client.get_daily_quotes("7203", "2026-01-01", "2026-01-31")
+    assert result == [{"Date": "2026-01-05", "Code": "7203", "C": 1000}]
 
-    assert len(post_calls) == 1  # 2回目はキャッシュされたid tokenを使う
+
+def test_get_topix_uses_correct_endpoint_and_params(monkeypatch):
+    client = JQuantsClient(api_key="dummy")
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        assert url == "https://api.jquants.com/v2/indices/bars/daily/topix"
+        assert params == {"from": "2026-01-01", "to": "2026-01-31"}
+        return _FakeResponse({"data": [{"Date": "2026-01-05", "C": 2000}]})
+
+    monkeypatch.setattr("pretrade.jquants_client.requests.get", fake_get)
+
+    result = client.get_topix("2026-01-01", "2026-01-31")
+    assert result == [{"Date": "2026-01-05", "C": 2000}]
+
+
+def test_pagination_key_follows_all_pages(monkeypatch):
+    client = JQuantsClient(api_key="dummy")
+    responses = [
+        {"data": [{"Date": "2026-01-01"}], "pagination_key": "page2"},
+        {"data": [{"Date": "2026-01-02"}]},
+    ]
+    calls = []
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        calls.append(params)
+        return _FakeResponse(responses.pop(0))
+
+    monkeypatch.setattr("pretrade.jquants_client.requests.get", fake_get)
+
+    result = client.get_topix("2026-01-01", "2026-01-31")
+    assert result == [{"Date": "2026-01-01"}, {"Date": "2026-01-02"}]
+    assert calls[0].get("pagination_key") is None
+    assert calls[1]["pagination_key"] == "page2"

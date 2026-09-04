@@ -3,8 +3,8 @@
 1Q進捗率が良いのに、TOPIX比で株価が反応しておらず、通期予想も据え置きの銘柄を
 発掘してランキングする。一過性利益(特別利益等)が主因とみられる銘柄は除外する。
 
-入力は J-Quants API のレスポンス形式(PascalCaseキーの辞書のリスト)をそのまま渡す想定。
-ネットワークアクセスは行わない(テスト容易性のため)。
+入力は J-Quants API V2 のレスポンス形式(/fins/summary, /equities/bars/daily の
+`data` 配列の要素)をそのまま渡す想定。ネットワークアクセスは行わない(テスト容易性のため)。
 """
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -43,7 +43,7 @@ def _price_before(quotes_sorted: list, cutoff_date: str) -> Optional[float]:
     for q in quotes_sorted:
         if (q.get("Date") or "") >= cutoff_date:
             break
-        close = to_float(q.get("AdjustmentClose")) or to_float(q.get("Close"))
+        close = to_float(q.get("AdjC")) or to_float(q.get("C"))
         if close is not None:
             candidate = close
     return candidate
@@ -51,7 +51,7 @@ def _price_before(quotes_sorted: list, cutoff_date: str) -> Optional[float]:
 
 def _latest_price(quotes_sorted: list) -> Optional[float]:
     for q in reversed(quotes_sorted):
-        close = to_float(q.get("AdjustmentClose")) or to_float(q.get("Close"))
+        close = to_float(q.get("AdjC")) or to_float(q.get("C"))
         if close is not None:
             return close
     return None
@@ -59,8 +59,8 @@ def _latest_price(quotes_sorted: list) -> Optional[float]:
 
 def has_large_one_time_gain(statement: dict) -> bool:
     """当期純利益が経常利益を上回る場合、特別利益等の一過性要因を疑う簡易ヒューリスティック。"""
-    profit = to_float(statement.get("Profit"))
-    ordinary = to_float(statement.get("OrdinaryProfit"))
+    profit = to_float(statement.get("NP"))
+    ordinary = to_float(statement.get("OdP"))
     if profit is None or ordinary is None or ordinary <= 0:
         return False
     return profit > ordinary
@@ -68,7 +68,7 @@ def has_large_one_time_gain(statement: dict) -> bool:
 
 def _latest_1q_statement(statements_sorted: list) -> Optional[dict]:
     for stmt in reversed(statements_sorted):
-        if stmt.get("TypeOfCurrentPeriod") == "1Q":
+        if stmt.get("CurPerType") == "1Q":
             return stmt
     return None
 
@@ -79,10 +79,15 @@ def analyze_ticker(
     quotes: list,
     topix_quotes: list,
     *,
-    progress_metric: str = "OperatingProfit",
+    progress_metric: str = "OP",
     as_of: Optional[str] = None,
 ) -> Optional[ScreenerCandidate]:
-    """1銘柄分のデータから ScreenerCandidate を計算する。データ不足時は None を返す。"""
+    """1銘柄分のデータから ScreenerCandidate を計算する。データ不足時は None を返す。
+
+    progress_metric は財務情報サマリー(/fins/summary)の実績値キー
+    (例: "OP"=営業利益, "NP"=当期純利益)。対応する予想値キーは "F" を前置した
+    ("FOP", "FNP" 等)ものを参照する。
+    """
     stmts = sort_statements(statements)
     q_stock = sort_quotes(quotes)
     q_topix = sort_quotes(topix_quotes)
@@ -92,12 +97,12 @@ def analyze_ticker(
         return None
 
     actual = to_float(q1_stmt.get(progress_metric))
-    forecast = to_float(q1_stmt.get(f"Forecast{progress_metric}"))
+    forecast = to_float(q1_stmt.get(f"F{progress_metric}"))
     if not actual or not forecast:
         return None
     progress_rate_pct = actual / forecast * 100
 
-    disclosed_date = q1_stmt.get("DisclosedDate")
+    disclosed_date = q1_stmt.get("DiscDate")
     if not disclosed_date:
         return None
 
@@ -113,13 +118,13 @@ def analyze_ticker(
     relative_reaction_pct = price_reaction_pct - topix_reaction_pct
 
     latest_stmt = stmts[-1]
-    latest_forecast = to_float(latest_stmt.get(f"Forecast{progress_metric}"))
+    latest_forecast = to_float(latest_stmt.get(f"F{progress_metric}"))
     if latest_stmt is q1_stmt:
         forecast_unchanged = True
         end_date_str = as_of or date.today().isoformat()
     else:
         forecast_unchanged = latest_forecast is not None and latest_forecast == forecast
-        end_date_str = latest_stmt.get("DisclosedDate") or (as_of or date.today().isoformat())
+        end_date_str = latest_stmt.get("DiscDate") or (as_of or date.today().isoformat())
 
     stagnant_days = (_parse_date(end_date_str) - _parse_date(disclosed_date)).days
     stagnant_days = max(stagnant_days, 0)
@@ -152,7 +157,7 @@ def find_unrecognized_progress(
     *,
     progress_threshold: float = DEFAULT_PROGRESS_THRESHOLD,
     reaction_threshold: float = DEFAULT_REACTION_THRESHOLD,
-    progress_metric: str = "OperatingProfit",
+    progress_metric: str = "OP",
     as_of: Optional[str] = None,
 ) -> list:
     """未認識の好進捗銘柄をランキングする。

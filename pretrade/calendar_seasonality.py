@@ -1,8 +1,8 @@
 """年間シーズナリティ・市場イベントカレンダー(2-1) データ分析側。
 
 過去N年の月次/週次騰落率、決算集中期、四半期末リバランス時期、権利落ち日の目安を集計する。
-入力は J-Quants API のレスポンス形式(PascalCaseキーの辞書のリスト)をそのまま渡す想定。
-ネットワークアクセスは行わない(テスト容易性のため)。
+入力は J-Quants API V2 のレスポンス形式(/fins/summary, /equities/bars/daily の
+`data` 配列の要素)をそのまま渡す想定。ネットワークアクセスは行わない(テスト容易性のため)。
 """
 from collections import defaultdict
 from datetime import date, datetime, timedelta
@@ -21,7 +21,7 @@ def _month_end_closes(quotes: list) -> dict:
     result = {}
     for q in sorted_quotes:
         date_str = q.get("Date")
-        close = to_float(q.get("AdjustmentClose")) or to_float(q.get("Close"))
+        close = to_float(q.get("AdjC")) or to_float(q.get("C"))
         if not date_str or close is None:
             continue
         d = _parse_date(date_str)
@@ -68,7 +68,7 @@ def weekly_return_stats(quotes: list) -> dict:
     week_end_close = {}
     for q in sorted_quotes:
         date_str = q.get("Date")
-        close = to_float(q.get("AdjustmentClose")) or to_float(q.get("Close"))
+        close = to_float(q.get("AdjC")) or to_float(q.get("C"))
         if not date_str or close is None:
             continue
         d = _parse_date(date_str)
@@ -99,7 +99,7 @@ def earnings_concentration_by_month(statements_by_ticker: dict) -> dict:
     counts = defaultdict(int)
     for ticker_data in statements_by_ticker.values():
         for stmt in ticker_data.get("statements", []):
-            date_str = stmt.get("DisclosedDate")
+            date_str = stmt.get("DiscDate")
             if not date_str:
                 continue
             counts[_parse_date(date_str).month] += 1
@@ -109,7 +109,7 @@ def earnings_concentration_by_month(statements_by_ticker: dict) -> dict:
 def estimate_ex_rights_dates(statements_by_ticker: dict) -> dict:
     """権利落ち日の目安を銘柄ごとに返す(近似値)。
 
-    J-Quants財務情報の CurrentFiscalYearEndDate(期末日=多くの場合の権利確定日)を基準に、
+    J-Quants財務情報の CurFYEn(当事業年度終了日=多くの場合の権利確定日)を基準に、
     権利落ち日 = 権利確定日の2営業日前、として簡易計算する。実際の権利確定日・配当設定は
     銘柄ごとに異なる場合があるため、あくまで目安として扱うこと。
 
@@ -121,7 +121,7 @@ def estimate_ex_rights_dates(statements_by_ticker: dict) -> dict:
         if not stmts:
             continue
         latest = stmts[-1]
-        fy_end = latest.get("CurrentFiscalYearEndDate")
+        fy_end = latest.get("CurFYEn")
         if not fy_end:
             continue
         record_date = _parse_date(fy_end)

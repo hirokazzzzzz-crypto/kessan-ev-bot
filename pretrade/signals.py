@@ -1,7 +1,9 @@
-"""J-Quants APIの生データ(財務情報・株価四本値)から、銘柄選定基準(2-2)の
+"""J-Quants API V2の生データ(財務情報・株価四本値)から、銘柄選定基準(2-2)の
 シグナルを導出する純粋関数群。ネットワークアクセスは行わない(テスト容易性のため)。
 
-入力は J-Quants API のレスポンス形式(PascalCaseキーの辞書のリスト)をそのまま渡す想定。
+入力は J-Quants API V2 のレスポンス形式(/fins/summary, /equities/bars/daily の
+`data` 配列の要素)をそのまま渡す想定。フィールド名はV2の略称キー
+(例: OP=営業利益, OdP=経常利益, NP=当期純利益, FOP=営業利益_予想_期末)に準拠する。
 """
 from typing import Optional
 
@@ -18,12 +20,16 @@ def to_float(value) -> Optional[float]:
 def sort_statements(statements: list) -> list:
     return sorted(
         statements,
-        key=lambda s: (s.get("DisclosedDate") or "", s.get("DisclosedTime") or ""),
+        key=lambda s: (s.get("DiscDate") or "", s.get("DiscTime") or ""),
     )
 
 
 def sort_quotes(quotes: list) -> list:
     return sorted(quotes, key=lambda q: q.get("Date") or "")
+
+
+def _volume(quote: dict) -> Optional[float]:
+    return to_float(quote.get("AdjVo")) or to_float(quote.get("Vo"))
 
 
 # -- 決算超過/上方修正 (+2) ------------------------------------------------
@@ -41,23 +47,23 @@ def detect_earnings_beat_or_upward_revision(statements: list) -> tuple:
     latest, previous = stmts[-1], stmts[-2]
     reasons = []
 
-    actual_profit = to_float(latest.get("Profit"))
-    prev_forecast_profit = to_float(previous.get("ForecastProfit"))
+    actual_profit = to_float(latest.get("NP"))
+    prev_forecast_profit = to_float(previous.get("FNP"))
     if actual_profit is not None and prev_forecast_profit:
         if actual_profit > prev_forecast_profit:
             reasons.append(
                 f"当期純利益が直前予想を上回る({actual_profit:.0f} > {prev_forecast_profit:.0f})"
             )
 
-    actual_op = to_float(latest.get("OperatingProfit"))
-    prev_forecast_op = to_float(previous.get("ForecastOperatingProfit"))
+    actual_op = to_float(latest.get("OP"))
+    prev_forecast_op = to_float(previous.get("FOP"))
     if actual_op is not None and prev_forecast_op:
         if actual_op > prev_forecast_op:
             reasons.append(
                 f"営業利益が直前予想を上回る({actual_op:.0f} > {prev_forecast_op:.0f})"
             )
 
-    latest_forecast_profit = to_float(latest.get("ForecastProfit"))
+    latest_forecast_profit = to_float(latest.get("FNP"))
     if latest_forecast_profit is not None and prev_forecast_profit:
         if latest_forecast_profit > prev_forecast_profit:
             reasons.append(
@@ -73,16 +79,14 @@ def detect_earnings_beat_or_upward_revision(statements: list) -> tuple:
 # -- PBR1倍割れ / PER割安 (各+1) -------------------------------------------
 
 def compute_pbr(statement: dict, price: float) -> Optional[float]:
-    bps = to_float(statement.get("BookValuePerShare"))
+    bps = to_float(statement.get("BPS"))
     if not bps:
         return None
     return price / bps
 
 
 def compute_per(statement: dict, price: float) -> Optional[float]:
-    eps = to_float(statement.get("ForecastEarningsPerShare")) or to_float(
-        statement.get("EarningsPerShare")
-    )
+    eps = to_float(statement.get("FEPS")) or to_float(statement.get("EPS"))
     if not eps or eps <= 0:
         return None
     return price / eps
@@ -106,9 +110,9 @@ def moving_average(values: list, window: int) -> Optional[float]:
 
 
 def is_volume_surge(quotes: list, window: int = 20, multiple: float = 2.0) -> bool:
-    """直近日の出来高が過去window日平均のmultiple倍以上なら急増と判定する。"""
+    """直近日の出来高(調整済み)が過去window日平均のmultiple倍以上なら急増と判定する。"""
     sorted_quotes = sort_quotes(quotes)
-    volumes = [to_float(q.get("Volume")) for q in sorted_quotes]
+    volumes = [_volume(q) for q in sorted_quotes]
     if len(volumes) < window + 1:
         return False
     latest = volumes[-1]
@@ -124,9 +128,9 @@ def close_series(quotes: list) -> list:
     sorted_quotes = sort_quotes(quotes)
     closes = []
     for q in sorted_quotes:
-        close = to_float(q.get("AdjustmentClose"))
+        close = to_float(q.get("AdjC"))
         if close is None:
-            close = to_float(q.get("Close"))
+            close = to_float(q.get("C"))
         closes.append(close)
     return closes
 

@@ -10,7 +10,7 @@ from pretrade.calendar_seasonality import (
 
 
 def _quote(d, close):
-    return {"Date": d, "Close": str(close)}
+    return {"Date": d, "C": str(close)}
 
 
 def test_monthly_return_stats_computes_month_over_month_change():
@@ -44,8 +44,8 @@ def test_weekly_return_stats_basic():
 
 def test_earnings_concentration_by_month():
     data = {
-        "7203": {"statements": [{"DisclosedDate": "2026-05-10"}, {"DisclosedDate": "2026-05-12"}]},
-        "9984": {"statements": [{"DisclosedDate": "2026-08-01"}]},
+        "7203": {"statements": [{"DiscDate": "2026-05-10"}, {"DiscDate": "2026-05-12"}]},
+        "9984": {"statements": [{"DiscDate": "2026-08-01"}]},
     }
     counts = earnings_concentration_by_month(data)
     assert counts[5] == 2
@@ -56,7 +56,7 @@ def test_estimate_ex_rights_dates_two_business_days_before_fy_end():
     data = {
         "7203": {
             "statements": [
-                {"DisclosedDate": "2026-05-01", "CurrentFiscalYearEndDate": "2026-03-31"}
+                {"DiscDate": "2026-05-01", "CurFYEn": "2026-03-31"}
             ]
         }
     }

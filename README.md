@@ -58,13 +58,12 @@ J-Quants API V2から財務情報・株価四本値・TOPIXを取得し、銘柄
 
 ### 認証情報の設定
 
-環境変数でJ-Quantsの認証情報を設定する(いずれか一方)。
+J-Quantsダッシュボード(設定 » API キー)で発行したAPIキーを環境変数に設定する。
+V2 APIはAPIキーをそのまま `x-api-key` ヘッダーに使うシンプルな方式で、
+V1のようなリフレッシュトークン/IDトークンの交換は不要。
 
 ```bash
-export JQUANTS_REFRESH_TOKEN="..."
-# または
-export JQUANTS_MAILADDRESS="..."
-export JQUANTS_PASSWORD="..."
+export JQUANTS_API_KEY="..."
 ```
 
 ### 使い方(CLI)
@@ -84,6 +83,16 @@ python main.py screen
 キャッシュファイルは既定で `data/market_cache.json`。`fetch-data`/`score`/`screen` とも
 `--cache` オプションで場所を変更できる。API呼び出しを都度行わずキャッシュ経由にすることで、
 レート制限の回避と結果の再現性を両立している。
+
+> **注意(プランによる制限)**: TOPIX(`/v2/indices/bars/daily/topix`)はJ-Quantsの
+> 契約プランによっては利用できない(APIが403を返す)。`fetch-data` はTOPIX取得に
+> 失敗しても警告を表示して処理を継続し、株価・財務情報は正常にキャッシュする。
+> ただしTOPIXが空の場合、対TOPIX反応度を使う「未認識の好進捗」スクリーナー(2-0)と
+> 暴落仕込みアラート(2-4)は該当銘柄なし/アラートなしとして扱われる。
+>
+> また、株価四本値・財務情報もプランによって取得可能な期間が決まっている
+> (契約範囲外の日付を指定すると400エラーになる)。`--from`/`--to` は契約期間内の
+> 日付を指定すること。
 
 スコアリング・スクリーニングのロジック(`signals.py` / `scoring.py` / `screener.py`)は
 J-Quants APIの生データ形式の辞書を受け取る純粋関数として実装されており、ネットワークアクセスを

@@ -21,8 +21,8 @@ def build_score_inputs(
     price = latest_price
     if price is None and q_stock:
         last_quote = q_stock[-1]
-        price = signals.to_float(last_quote.get("AdjustmentClose")) or signals.to_float(
-            last_quote.get("Close")
+        price = signals.to_float(last_quote.get("AdjC")) or signals.to_float(
+            last_quote.get("C")
         )
 
     pbr = per = None
