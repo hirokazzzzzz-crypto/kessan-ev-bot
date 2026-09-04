@@ -50,18 +50,63 @@ python main.py export-csv --out data/trade_theses.csv
 根拠分類は銘柄選定スコアリング基準(2-2)と揃えている:
 決算超過/上方修正・PBR1倍割れ・PER割安・出来高急増・トレンド転換・その他。
 
+## Phase 2: 銘柄選定基準の自動スコアリング(2-2)+「未認識の好進捗」スクリーナー(2-0)
+
+J-Quants API V2から財務情報・株価四本値・TOPIXを取得し、銘柄選定基準を自動でスコアリングする。
+あわせて、1Q進捗率が良好なのにTOPIX比で株価が反応しておらず、通期予想も据え置きの
+「未認識の好進捗」銘柄を発掘してランキングする。
+
+### 認証情報の設定
+
+環境変数でJ-Quantsの認証情報を設定する(いずれか一方)。
+
+```bash
+export JQUANTS_REFRESH_TOKEN="..."
+# または
+export JQUANTS_MAILADDRESS="..."
+export JQUANTS_PASSWORD="..."
+```
+
+### 使い方(CLI)
+
+```bash
+# J-Quants APIから財務・株価データを取得してローカルにキャッシュ(GitHub Actions定期バッチ想定)
+python main.py fetch-data --codes 7203,9984 --from 2026-01-01 --to 2026-09-01
+
+# 銘柄選定基準のスコアリング(決算超過/上方修正+2、PBR1倍割れ+1、PER割安+1、
+# 出来高急増+1、トレンド転換+1、除外条件-3。内訳を表示)
+python main.py score --ticker 7203
+
+# 「未認識の好進捗」スクリーナー: 進捗率・対TOPIX株価反応・据え置き期間でランキング
+python main.py screen
+```
+
+キャッシュファイルは既定で `data/market_cache.json`。`fetch-data`/`score`/`screen` とも
+`--cache` オプションで場所を変更できる。API呼び出しを都度行わずキャッシュ経由にすることで、
+レート制限の回避と結果の再現性を両立している。
+
+スコアリング・スクリーニングのロジック(`signals.py` / `scoring.py` / `screener.py`)は
+J-Quants APIの生データ形式の辞書を受け取る純粋関数として実装されており、ネットワークアクセスを
+含まないため、実際のAPIキーがなくても単体テストで検証できる。
+
 ### ディレクトリ構成
 
 ```
 pretrade/
-  db.py           SQLiteスキーマ・接続管理
-  rr.py           リスクリワード比の自動計算
-  models.py       トレード仮説のデータモデル・登録/決済ロジック
-  report.py       月次レポート(仮説vs結果、根拠別勝率集計)
-  csv_export.py   既存ポジション管理CSVと連携するための書き出し
-  cli.py          CLIエントリポイント
-main.py           CLI簡易起動スクリプト
-tests/            pytestテスト一式
+  db.py            SQLiteスキーマ・接続管理
+  rr.py            リスクリワード比の自動計算
+  models.py        トレード仮説のデータモデル・登録/決済ロジック
+  report.py        月次レポート(仮説vs結果、根拠別勝率集計)
+  csv_export.py    既存ポジション管理CSVと連携するための書き出し
+  jquants_client.py  J-Quants API V2の認証・データ取得ラッパー
+  signals.py       財務・株価データから選定基準シグナルを導出する純粋関数群
+  scoring.py       銘柄選定基準スコアリング(2-2)
+  screener.py      「未認識の好進捗」スクリーナー(2-0)
+  scan.py          J-Quantsデータ -> ScoreInputs の変換
+  fetch_cache.py    J-Quants APIの取得結果をローカルJSONにキャッシュ
+  cli.py           CLIエントリポイント
+main.py            CLI簡易起動スクリプト
+tests/             pytestテスト一式
 ```
 
 ### テスト
@@ -72,7 +117,6 @@ python -m pytest
 
 ## 今後のフェーズ
 
-- Phase 2: 銘柄選定基準の自動スコアリング(2-2)、「未認識の好進捗」スクリーナー(2-0)
 - Phase 3: 年間シーズナリティ・市場イベントカレンダー(2-1)、現金比率コントロール(2-4)
 - Phase 4: Streamlit/HTMLダッシュボードへの統合
 

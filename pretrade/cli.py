@@ -7,6 +7,9 @@
     python -m pretrade.cli exit --id 3       # 対話形式で決済の振り返りを登録
     python -m pretrade.cli report --month 2026-08
     python -m pretrade.cli export-csv [--out data/trade_theses.csv]
+    python -m pretrade.cli fetch-data --codes 7203,9984 --from 2026-01-01 --to 2026-09-01
+    python -m pretrade.cli score --ticker 7203
+    python -m pretrade.cli screen
 """
 import argparse
 import sys
@@ -16,6 +19,10 @@ from .rr import calculate_rr, RR_WARNING_THRESHOLD
 from .models import create_thesis, close_thesis, list_open, get_thesis
 from .report import monthly_report_text
 from .csv_export import export_csv
+from .fetch_cache import fetch_and_cache, load_cache
+from .scan import build_score_inputs
+from .scoring import score_stock, format_score_result
+from .screener import find_unrecognized_progress, DEFAULT_PROGRESS_THRESHOLD, DEFAULT_REACTION_THRESHOLD
 
 
 def _prompt(label, cast=str, choices=None):
@@ -143,6 +150,48 @@ def cmd_export_csv(args):
     return 0
 
 
+def cmd_fetch_data(args):
+    codes = [c.strip() for c in args.codes.split(",") if c.strip()]
+    path = fetch_and_cache(codes, args.from_date, args.to_date, args.out)
+    print(f"データを取得しキャッシュしました: {path}")
+    return 0
+
+
+def cmd_score(args):
+    cache = load_cache(args.cache)
+    ticker_data = cache.get("tickers", {}).get(args.ticker)
+    if ticker_data is None:
+        print(f"キャッシュに {args.ticker} のデータがありません。先に fetch-data を実行してください。")
+        return 1
+
+    inputs = build_score_inputs(args.ticker, ticker_data["statements"], ticker_data["quotes"])
+    result = score_stock(inputs)
+    print(format_score_result(result))
+    return 0
+
+
+def cmd_screen(args):
+    cache = load_cache(args.cache)
+    candidates = find_unrecognized_progress(
+        cache.get("tickers", {}),
+        cache.get("topix", []),
+        progress_threshold=args.progress_threshold,
+        reaction_threshold=args.reaction_threshold,
+    )
+    if not candidates:
+        print("条件に合致する「未認識の好進捗」銘柄はありませんでした。")
+        return 0
+
+    print("--- 未認識の好進捗 銘柄ランキング ---")
+    for c in candidates:
+        print(
+            f"{c.ticker}: 進捗率={c.progress_rate_pct:.1f}% "
+            f"対TOPIX反応={c.relative_reaction_pct:+.1f}% "
+            f"据え置き{c.stagnant_days}日 スコア={c.rank_score:.1f}"
+        )
+    return 0
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="売買前チェックシステム(アルファ明確化ゲート)")
     parser.add_argument("--db", default=None, help="SQLiteファイルのパス(省略時は data/pretrade.db)")
@@ -177,6 +226,24 @@ def build_parser():
     p_csv = sub.add_parser("export-csv", help="既存のポジション管理CSVと連携するための書き出し")
     p_csv.add_argument("--out", default="data/trade_theses.csv")
     p_csv.set_defaults(func=cmd_export_csv)
+
+    p_fetch = sub.add_parser("fetch-data", help="J-Quants APIから財務・株価データを取得しキャッシュ")
+    p_fetch.add_argument("--codes", required=True, help="カンマ区切りの銘柄コード(例: 7203,9984)")
+    p_fetch.add_argument("--from", dest="from_date", required=True, help="YYYY-MM-DD")
+    p_fetch.add_argument("--to", dest="to_date", required=True, help="YYYY-MM-DD")
+    p_fetch.add_argument("--out", default=None, help="キャッシュ先(省略時は data/market_cache.json)")
+    p_fetch.set_defaults(func=cmd_fetch_data)
+
+    p_score = sub.add_parser("score", help="銘柄選定基準のスコアリング(2-2)")
+    p_score.add_argument("--ticker", required=True)
+    p_score.add_argument("--cache", default=None, help="キャッシュファイル(省略時は data/market_cache.json)")
+    p_score.set_defaults(func=cmd_score)
+
+    p_screen = sub.add_parser("screen", help="「未認識の好進捗」スクリーナー(2-0)")
+    p_screen.add_argument("--cache", default=None, help="キャッシュファイル(省略時は data/market_cache.json)")
+    p_screen.add_argument("--progress-threshold", type=float, default=DEFAULT_PROGRESS_THRESHOLD)
+    p_screen.add_argument("--reaction-threshold", type=float, default=DEFAULT_REACTION_THRESHOLD)
+    p_screen.set_defaults(func=cmd_screen)
 
     return parser
 
