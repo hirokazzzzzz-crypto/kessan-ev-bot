@@ -70,6 +70,59 @@ def cash_alerts_table(alerts: list) -> list:
     ]
 
 
+def topix_candidates_table(candidates: list) -> list:
+    rows = []
+    for c in candidates:
+        pos = c.price_position or {}
+        pricing = c.priced_in
+        rows.append(
+            {
+                "銘柄名": c.name,
+                "コード": c.ticker,
+                "先回り候補": "★" if c.is_precede_candidate else "",
+                "採用候補度": round(c.candidate_score, 0),
+                "パターン": c.pattern,
+                "採用予想の根拠": c.forecast_basis,
+                "JPX基準適合度(近似)": f"{c.jpx_fit.fit_score}/{c.jpx_fit.max_score}",
+                "織り込み度": pricing.priced_in_level,
+                "対TOPIX相対反応(%)": (
+                    round(pricing.relative_reaction_pct, 1) if pricing.relative_reaction_pct is not None else None
+                ),
+                "52週高値から(%)": round(pos["pct_from_high"], 1) if pos.get("pct_from_high") is not None else None,
+                "52週安値から(%)": round(pos["pct_from_low"], 1) if pos.get("pct_from_low") is not None else None,
+                "注目すべき時期": c.watch_period,
+            }
+        )
+    return rows
+
+
+def topix_forecasts_table(forecasts: list) -> list:
+    return [
+        {
+            "id": f.id,
+            "銘柄": f.ticker,
+            "証券会社": f.broker,
+            "区分": "新規採用" if f.forecast_type == "new" else "除外",
+            "言及日": f.mentioned_at,
+            "メモ": f.source_note,
+        }
+        for f in forecasts
+    ]
+
+
+def topix_outcomes_table(outcomes: list) -> list:
+    return [
+        {
+            "銘柄": o.ticker,
+            "結果": o.outcome,
+            "発表日": o.announcement_date,
+            "発表日反応(%)": o.price_reaction_pct,
+            "メモ": o.note,
+        }
+        for o in outcomes
+    ]
+
+
 def memos_table(memos: list) -> list:
     return [
         {

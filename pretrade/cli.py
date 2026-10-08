@@ -14,6 +14,15 @@
     python -m pretrade.cli memo-due
     python -m pretrade.cli seasonality
     python -m pretrade.cli cash-check
+    python -m pretrade.cli topix-fit-set --ticker 593A --market-cap 1.2e11 \
+        --annual-trading-value 3e10 --segment グロース --cap-percentile 40
+    python -m pretrade.cli topix-forecast-add --ticker 593A --broker 大和証券 \
+        --review-date 2026-10 --type new --mentioned-at 2026-09-02
+    python -m pretrade.cli topix-rank --review-date 2026-10
+    python -m pretrade.cli topix-watchlist --review-date 2026-10
+    python -m pretrade.cli topix-outcome-add --ticker 593A --review-date 2026-10 \
+        --outcome "予想通り採用" --announcement-date 2026-10-07 --reaction-pct 1.81
+    python -m pretrade.cli topix-outcome-report --review-date 2026-10
 """
 import argparse
 import sys
@@ -43,6 +52,20 @@ from .cash_control import (
 )
 from .slack_notify import send_slack_message
 from . import signals
+from .topix_db import (
+    add_forecast as topix_add_forecast,
+    add_outcome as topix_add_outcome,
+    accuracy_report as topix_accuracy_report,
+    forecasts_by_ticker as topix_forecasts_by_ticker,
+    list_forecasts as topix_list_forecasts,
+    list_outcomes as topix_list_outcomes,
+)
+from .topix_review import (
+    OUTCOME_CHOICES,
+    build_candidates_from_raw,
+    precede_watchlist,
+)
+from .topix_fit_store import load_fit_inputs, save_fit_inputs
 
 
 def _prompt(label, cast=str, choices=None):
@@ -316,6 +339,133 @@ def cmd_cash_check(args):
     return 0
 
 
+def cmd_topix_fit_set(args):
+    data = load_fit_inputs(args.fit_data)
+    data[args.ticker] = {
+        "market_cap": args.market_cap,
+        "annual_trading_value": args.annual_trading_value,
+        "market_segment": args.segment,
+        "market_cap_percentile": args.cap_percentile,
+    }
+    path = save_fit_inputs(data, args.fit_data)
+    print(f"{args.ticker} のJPX適合度入力データを保存しました: {path}")
+    print("  ※浮動株時価総額の正式データではなく、発行済株式ベースの近似値である点に注意してください。")
+    return 0
+
+
+def cmd_topix_forecast_add(args):
+    conn = get_connection(args.db)
+    forecast = topix_add_forecast(
+        conn,
+        ticker=args.ticker,
+        broker=args.broker,
+        review_date=args.review_date,
+        forecast_type=args.type,
+        mentioned_at=args.mentioned_at,
+        source_note=args.note or "",
+    )
+    print(f"登録しました: id={forecast.id} {forecast.ticker} {forecast.broker} ({forecast.forecast_type})")
+    return 0
+
+
+def cmd_topix_forecast_list(args):
+    conn = get_connection(args.db)
+    forecasts = topix_list_forecasts(conn, review_date=args.review_date, ticker=args.ticker)
+    if not forecasts:
+        print("登録されている採用予想はありません。")
+        return 0
+    for f in forecasts:
+        print(f"#{f.id} {f.ticker} {f.broker} [{f.forecast_type}] {f.mentioned_at} {f.source_note}")
+    return 0
+
+
+def _build_candidates_for_review(args):
+    """キャッシュ(J-Quants)・JPX適合度入力・採用予想ログを組み合わせて候補一覧を作る。
+
+    対象ティッカーは「キャッシュに価格データがある銘柄」かつ
+    「JPX適合度入力または採用予想ログのどちらかがある銘柄」に限定する
+    (どちらも無い銘柄は判定材料が無いため候補として出さない)。
+    """
+    cache = load_cache(args.cache)
+    fit_inputs_raw = load_fit_inputs(args.fit_data)
+    conn = get_connection(args.db)
+    forecasts_grouped = topix_forecasts_by_ticker(conn, args.review_date)
+
+    return build_candidates_from_raw(
+        fit_inputs_raw, forecasts_grouped, cache.get("tickers", {}), cache.get("topix", []), args.basis_date
+    )
+
+
+def _print_candidate(c, index=None):
+    prefix = f"{index}. " if index is not None else ""
+    flag = " ★先回り候補" if c.is_precede_candidate else ""
+    print(f"{prefix}{c.name}({c.ticker}){flag}")
+    print(f"    採用候補度: {c.candidate_score:.0f}  パターン: {c.pattern}")
+    print(f"    採用予想の根拠: {c.forecast_basis}")
+    fit = c.jpx_fit
+    print(f"    JPX基準適合度(近似): {fit.fit_score}/{fit.max_score}" + ("" if not fit.data_notes else f"  [{'; '.join(fit.data_notes)}]"))
+    pricing = c.priced_in
+    if pricing.relative_reaction_pct is not None:
+        print(f"    織り込み度: {pricing.priced_in_level}(対TOPIX相対{pricing.relative_reaction_pct:+.1f}%, 基準日{pricing.since_date})")
+    else:
+        print(f"    織り込み度: {pricing.priced_in_level}")
+    if c.price_position:
+        pos = c.price_position
+        print(f"    現在の株価位置: 52週高値から{pos['pct_from_high']:+.1f}% / 52週安値から{pos['pct_from_low']:+.1f}%")
+    print(f"    注目すべき時期: {c.watch_period}")
+
+
+def cmd_topix_rank(args):
+    candidates = _build_candidates_for_review(args)
+    if not candidates:
+        print("候補銘柄がありません。topix-fit-set または topix-forecast-add でデータを登録してください。")
+        return 0
+    print(f"--- TOPIX採用候補ランキング(基準日={args.basis_date}) ---")
+    for i, c in enumerate(candidates, start=1):
+        _print_candidate(c, index=i)
+    return 0
+
+
+def cmd_topix_watchlist(args):
+    candidates = _build_candidates_for_review(args)
+    watchlist = precede_watchlist(candidates)
+    if not watchlist:
+        print("「採用可能性が高い×織り込み度が低い」先回り候補は現在ありません。")
+        return 0
+    print("--- TOPIX採用先回り候補ウォッチリスト ---")
+    for i, c in enumerate(watchlist, start=1):
+        _print_candidate(c, index=i)
+    return 0
+
+
+def cmd_topix_outcome_add(args):
+    conn = get_connection(args.db)
+    outcome = topix_add_outcome(
+        conn,
+        ticker=args.ticker,
+        review_date=args.review_date,
+        outcome=args.outcome,
+        announcement_date=args.announcement_date,
+        price_reaction_pct=args.reaction_pct,
+        note=args.note or "",
+    )
+    print(f"登録しました: id={outcome.id} {outcome.ticker} [{outcome.outcome}]")
+    return 0
+
+
+def cmd_topix_outcome_report(args):
+    conn = get_connection(args.db)
+    report = topix_accuracy_report(conn, review_date=args.review_date)
+    print(f"--- TOPIX採用予想 精度レポート(件数={report['total']}) ---")
+    for outcome, count in report["by_outcome"].items():
+        print(f"  {outcome}: {count}件")
+    outcomes = topix_list_outcomes(conn, review_date=args.review_date)
+    for o in outcomes:
+        reaction = f"{o.price_reaction_pct:+.2f}%" if o.price_reaction_pct is not None else "―"
+        print(f"    {o.ticker}: [{o.outcome}] 発表日反応={reaction} {o.note}")
+    return 0
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="売買前チェックシステム(アルファ明確化ゲート)")
     parser.add_argument("--db", default=None, help="SQLiteファイルのパス(省略時は data/pretrade.db)")
@@ -392,6 +542,66 @@ def build_parser():
     p_cash = sub.add_parser("cash-check", help="現金比率コントロール: 利確検討/損切り/暴落仕込みアラート(2-4)")
     p_cash.add_argument("--cache", default=None, help="キャッシュファイル(省略時は data/market_cache.json)")
     p_cash.set_defaults(func=cmd_cash_check)
+
+    p_topix_fit = sub.add_parser(
+        "topix-fit-set", help="TOPIX採用予想(Phase5): JPX基準適合度の入力データを登録(近似値)"
+    )
+    p_topix_fit.add_argument("--ticker", required=True)
+    p_topix_fit.add_argument("--market-cap", type=float, default=None, help="発行済株式ベース時価総額(円)")
+    p_topix_fit.add_argument("--annual-trading-value", type=float, default=None, help="年間売買代金(円)")
+    p_topix_fit.add_argument("--segment", default=None, help="プライム/スタンダード/グロース")
+    p_topix_fit.add_argument("--cap-percentile", type=float, default=None, help="時価総額の市場内パーセンタイル(0-100)")
+    p_topix_fit.add_argument("--fit-data", default=None, help="保存先(省略時は data/topix_fit_inputs.json)")
+    p_topix_fit.set_defaults(func=cmd_topix_fit_set)
+
+    p_topix_fc_add = sub.add_parser(
+        "topix-forecast-add", help="TOPIX採用予想(Phase5): 証券会社等の採用予想を手動ログ"
+    )
+    p_topix_fc_add.add_argument("--ticker", required=True)
+    p_topix_fc_add.add_argument("--broker", required=True, help="例: 大和証券")
+    p_topix_fc_add.add_argument("--review-date", required=True, help="対象の入替回(例: 2026-10)")
+    p_topix_fc_add.add_argument("--type", dest="type", choices=["new", "exclude"], required=True)
+    p_topix_fc_add.add_argument("--mentioned-at", required=True, help="予想が出た日(YYYY-MM-DD)")
+    p_topix_fc_add.add_argument("--note", default=None)
+    p_topix_fc_add.set_defaults(func=cmd_topix_forecast_add)
+
+    p_topix_fc_list = sub.add_parser("topix-forecast-list", help="TOPIX採用予想(Phase5): ログ済み予想の一覧")
+    p_topix_fc_list.add_argument("--review-date", default=None)
+    p_topix_fc_list.add_argument("--ticker", default=None)
+    p_topix_fc_list.set_defaults(func=cmd_topix_forecast_list)
+
+    def _add_rank_args(p):
+        p.add_argument("--review-date", required=True, help="対象の入替回(例: 2026-10)")
+        p.add_argument("--basis-date", required=True, help="基準日(YYYY-MM-DD)")
+        p.add_argument("--cache", default=None, help="キャッシュファイル(省略時は data/market_cache.json)")
+        p.add_argument("--fit-data", default=None, help="JPX適合度入力データ(省略時は data/topix_fit_inputs.json)")
+
+    p_topix_rank = sub.add_parser("topix-rank", help="TOPIX採用候補ランキング(Phase5)")
+    _add_rank_args(p_topix_rank)
+    p_topix_rank.set_defaults(func=cmd_topix_rank)
+
+    p_topix_watch = sub.add_parser(
+        "topix-watchlist", help="TOPIX採用先回り候補(採用可能性高×織り込み度低)のウォッチリスト(Phase5)"
+    )
+    _add_rank_args(p_topix_watch)
+    p_topix_watch.set_defaults(func=cmd_topix_watchlist)
+
+    p_topix_out_add = sub.add_parser(
+        "topix-outcome-add", help="TOPIX採用予想(Phase5): 発表後の結果(予想通り/予想外/見送り)を記録"
+    )
+    p_topix_out_add.add_argument("--ticker", required=True)
+    p_topix_out_add.add_argument("--review-date", required=True)
+    p_topix_out_add.add_argument("--outcome", choices=OUTCOME_CHOICES, required=True)
+    p_topix_out_add.add_argument("--announcement-date", default=None)
+    p_topix_out_add.add_argument("--reaction-pct", type=float, default=None, help="発表日の株価反応(%)")
+    p_topix_out_add.add_argument("--note", default=None)
+    p_topix_out_add.set_defaults(func=cmd_topix_outcome_add)
+
+    p_topix_out_report = sub.add_parser(
+        "topix-outcome-report", help="TOPIX採用予想(Phase5): 予想通り/予想外/見送りの件数集計(精度確認)"
+    )
+    p_topix_out_report.add_argument("--review-date", default=None)
+    p_topix_out_report.set_defaults(func=cmd_topix_outcome_report)
 
     return parser
 

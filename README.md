@@ -144,12 +144,13 @@ Phase 1〜3のCLI機能を1つのStreamlitダッシュボードに統合した�
 streamlit run app.py
 ```
 
-ブラウザで以下の4ページを行き来できる:
+ブラウザで以下の5ページを行き来できる:
 
 - **概要**: 保有中トレード数・市場データキャッシュの状態
 - **売買前チェック(Phase1)**: 買う前チェックの登録フォーム、保有中一覧、決済チェック、月次レポート
 - **銘柄選定・スクリーニング(Phase2)**: スコアリング内訳の表示、未認識の好進捗スクリーナー(閾値をスライダーで調整可能)
 - **シーズナリティ・現金比率(Phase3)**: 月次騰落率・決算集中期のグラフ、メモの登録・一覧、現金比率アラート
+- **TOPIX採用予想・需給分析(Phase5)**: 採用候補ランキング・先回り候補ウォッチリスト、採用予想ログの登録・一覧、発表後の結果記録・精度レポート
 
 サイドバーの「市場データの取得(J-Quants)」から、`fetch-data` 相当の処理をブラウザ上からも実行できる
 (認証情報は環境変数の設定が必要、Phase 2の節を参照)。
@@ -175,6 +176,9 @@ pretrade/
   cash_control.py           現金比率コントロール(2-4)
   slack_notify.py           Slack Webhook通知
   dashboard_data.py         ダッシュボード表示用のデータ整形(2-2/2-4節のロジックとは独立、単体テスト可能)
+  topix_review.py           TOPIX採用予想・需給分析の純粋関数群(Phase5)
+  topix_db.py                採用予想ログ・発表後の結果記録のDB側(Phase5)
+  topix_fit_store.py         JPX適合度(近似)入力データのJSON永続化(Phase5)
   cli.py                    CLIエントリポイント
 main.py                     CLI簡易起動スクリプト
 tests/                      pytestテスト一式
@@ -188,5 +192,59 @@ python -m pytest
 
 `app.py` 自体はStreamlit UIのため自動テストの対象外だが、表示用データ整形(`dashboard_data.py`)は
 単体テストで検証している。UIの動作は `streamlit run app.py` を実際に起動し、ブラウザで確認済み。
+
+## Phase 5: TOPIX採用予想・需給分析
+
+正式発表後の採用銘柄を追うのではなく、**採用される可能性が高い銘柄を正式発表前から発掘する**ことを目的とする。
+以下の3つを組み合わせて判断する:
+
+1. **JPX選定基準への適合度(近似)**: 2026年10月のTOPIX改革(第2段階見直し)で公表された基準
+   (新規採用: 年間売買代金回転率0.20以上 かつ 浮動株時価総額の累積比率が上位96%以内)をもとにスコアリングする。
+   > ⚠️ **J-Quantsの契約APIには大株主構成(浮動株比率)のエンドポイントが無く、JPX本家の算出方法も
+   > 非公開データに依存するため、ここで出せるのは発行済株式ベースの時価総額・売買代金から試算した
+   > 近似値**。欠けている入力は結果の `data_notes` に明記される。
+2. **証券会社等の採用予想の集計**: 大和証券などが公表する採用予想を自動取得する手段がないため、
+   見つけた都度 `topix-forecast-add` で手動ログする(既存のシーズナリティメモ(2-1)と同じ思想)。
+   複数の証券会社で繰り返し候補になっている銘柄を高く評価する。
+3. **織り込み度の分析**: 採用予想が最初に出た日以降、対TOPIXでどれだけ相対的に上昇したか
+   (`screener.py` の対TOPIX反応度と同じ考え方)を見て、「材料出尽くしリスク(予想多数+大きく先行上昇)」と
+   「予想外採用による上昇余地(予想少数/無+反応薄)」の2パターンを区別する。
+
+最終的に「採用可能性が高い × 織り込み度が低い」銘柄だけを抜き出した**先回り候補ウォッチリスト**を出す。
+正式発表後は `topix-outcome-add` で「予想通り採用/予想外採用/採用見送り」と実際の株価反応を記録し、
+次回予想の精度確認に使う(`topix-outcome-report`)。
+
+実例として、2026年10月7日のTOPIX新規採用銘柄であるティアフォー(593A)を検証データに使っている
+(大和証券が9/2時点で採用候補として言及、発表日に+1.81%、引け後PTSで+7.92%まで上昇)。
+
+### 使い方(CLI)
+
+```bash
+# JPX基準適合度(近似)の入力データを登録(発行済株式ベースの時価総額・年間売買代金など)
+python main.py topix-fit-set --ticker 593A --market-cap 1.2e11 \
+    --annual-trading-value 3e10 --segment グロース --cap-percentile 40
+
+# 証券会社等の採用予想を手動ログ
+python main.py topix-forecast-add --ticker 593A --broker 大和証券 \
+    --review-date 2026-10 --type new --mentioned-at 2026-09-02 --note "グロース新規候補として言及"
+python main.py topix-forecast-list --review-date 2026-10
+
+# TOPIX採用候補ランキング / 先回り候補ウォッチリスト
+python main.py topix-rank --review-date 2026-10 --basis-date 2026-08-31
+python main.py topix-watchlist --review-date 2026-10 --basis-date 2026-08-31
+
+# 正式発表後の結果記録 + 精度レポート
+python main.py topix-outcome-add --ticker 593A --review-date 2026-10 \
+    --outcome "予想通り採用" --announcement-date 2026-10-07 --reaction-pct 1.81
+python main.py topix-outcome-report --review-date 2026-10
+```
+
+`topix-rank`/`topix-watchlist` は `fetch-data` で作成した市場データキャッシュ(価格データ)と、
+`topix-fit-set` で登録したJPX適合度入力、`topix-forecast-add` で登録した採用予想ログを組み合わせて
+候補を計算する。どちらの入力も無い銘柄は判定材料が無いため候補として出さない。
+
+ロジック(`topix_review.py`)は既存モジュールと同じ方針で純粋関数として実装されており、
+ネットワークアクセスを含まないため単体テストで検証できる。DB側(`topix_db.py`)とJSON入力の
+永続化(`topix_fit_store.py`)は分離している。
 
 詳細は仕様書を参照。

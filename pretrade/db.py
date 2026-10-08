@@ -49,6 +49,31 @@ CREATE TABLE IF NOT EXISTS calendar_memos (
     tags TEXT NOT NULL DEFAULT '',
     note TEXT NOT NULL
 );
+
+-- Phase 5: TOPIX採用予想・需給分析(topix_review.py)
+-- 証券会社等の採用予想は自動取得できないため、見つけた都度ここに手動ログする。
+CREATE TABLE IF NOT EXISTS topix_broker_forecasts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    broker TEXT NOT NULL,
+    review_date TEXT NOT NULL,
+    forecast_type TEXT NOT NULL,
+    mentioned_at TEXT NOT NULL,
+    source_note TEXT NOT NULL DEFAULT ''
+);
+
+-- 正式発表後の結果(予想通り/予想外/見送り)と株価反応を記録し、次回予想の精度向上に使う。
+CREATE TABLE IF NOT EXISTS topix_outcomes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    review_date TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    announcement_date TEXT,
+    price_reaction_pct REAL,
+    note TEXT NOT NULL DEFAULT ''
+);
 """
 
 

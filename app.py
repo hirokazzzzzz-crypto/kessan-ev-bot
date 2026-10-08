@@ -30,6 +30,9 @@ from pretrade.dashboard_data import (
     open_theses_table,
     score_breakdown_table,
     screener_table,
+    topix_candidates_table,
+    topix_forecasts_table,
+    topix_outcomes_table,
 )
 from pretrade.db import AS_EXPECTED_CHOICES, EXIT_REASONS, RATIONALE_CATEGORIES, get_connection
 from pretrade.fetch_cache import fetch_and_cache, load_cache
@@ -39,6 +42,20 @@ from pretrade.rr import RR_WARNING_THRESHOLD, calculate_rr
 from pretrade.scan import build_score_inputs
 from pretrade.screener import find_unrecognized_progress
 from pretrade.scoring import score_stock
+from pretrade.topix_fit_store import load_fit_inputs as load_topix_fit_inputs, save_fit_inputs as save_topix_fit_inputs
+from pretrade.topix_db import (
+    accuracy_report as topix_accuracy_report,
+    add_forecast as topix_add_forecast,
+    add_outcome as topix_add_outcome,
+    forecasts_by_ticker as topix_forecasts_by_ticker,
+    list_forecasts as topix_list_forecasts,
+    list_outcomes as topix_list_outcomes,
+)
+from pretrade.topix_review import (
+    OUTCOME_CHOICES as TOPIX_OUTCOME_CHOICES,
+    build_candidates_from_raw as topix_build_candidates_from_raw,
+    precede_watchlist as topix_precede_watchlist,
+)
 
 st.set_page_config(page_title="売買判断支援ダッシュボード", layout="wide")
 
@@ -50,6 +67,15 @@ def load_market_cache():
         return None
 
 
+def _build_topix_candidates(conn, cache, review_date, basis_date):
+    """市場データキャッシュ・JPX適合度入力・採用予想ログを組み合わせて候補一覧を作る(cli.pyと同じロジック)。"""
+    fit_inputs_raw = load_topix_fit_inputs()
+    forecasts_grouped = topix_forecasts_by_ticker(conn, review_date)
+    return topix_build_candidates_from_raw(
+        fit_inputs_raw, forecasts_grouped, cache.get("tickers", {}), cache.get("topix", []), basis_date
+    )
+
+
 # Streamlitのスクリプトはリランのたびにワーカースレッドをまたぐことがあり、
 # sqlite3の接続はスレッドをまたいで使い回せないため、st.cache_resourceでは
 # キャッシュせず毎回開き直す(SQLiteへの接続はローカルファイルのため軽量)。
@@ -59,7 +85,13 @@ with st.sidebar:
     st.title("売買判断支援システム")
     page = st.radio(
         "ページ",
-        ["概要", "売買前チェック(Phase1)", "銘柄選定・スクリーニング(Phase2)", "シーズナリティ・現金比率(Phase3)"],
+        [
+            "概要",
+            "売買前チェック(Phase1)",
+            "銘柄選定・スクリーニング(Phase2)",
+            "シーズナリティ・現金比率(Phase3)",
+            "TOPIX採用予想・需給分析(Phase5)",
+        ],
     )
 
     with st.expander("市場データの取得(J-Quants)"):
@@ -325,3 +357,122 @@ elif page == "シーズナリティ・現金比率(Phase3)":
                 st.table(cash_alerts_table(alerts))
             else:
                 st.info("現時点でアラートはありません。")
+
+
+elif page == "TOPIX採用予想・需給分析(Phase5)":
+    st.header("Phase 5: TOPIX採用予想・需給分析")
+    st.caption(
+        "正式発表後の採用銘柄を追うのではなく、採用される可能性が高い銘柄を正式発表前から発掘する。"
+        "⚠️ JPX基準適合度は浮動株比率データを取得できないため近似値。証券会社の採用予想は自動取得できないため手動ログ。"
+    )
+    cache = load_market_cache()
+    tab_rank, tab_forecast, tab_outcome = st.tabs(["採用候補ランキング", "採用予想ログ", "発表後の結果記録"])
+
+    with tab_rank:
+        if cache is None:
+            st.warning("market_cache.json が見つかりません。サイドバーから市場データを取得してください。")
+        else:
+            col_a, col_b = st.columns(2)
+            review_date = col_a.text_input("対象の入替回(例: 2026-10)", value="2026-10", key="topix_review_date")
+            basis_date = col_b.text_input("基準日(YYYY-MM-DD)", value="2026-08-31", key="topix_basis_date")
+
+            with st.expander("JPX基準適合度の入力(近似値、銘柄ごとに手動登録)"):
+                tickers_in_cache = list(cache.get("tickers", {}).keys())
+                if tickers_in_cache:
+                    fit_ticker = st.selectbox("銘柄コード", tickers_in_cache, key="topix_fit_ticker")
+                    fit_name = st.text_input("銘柄名", key="topix_fit_name")
+                    fit_cap = st.number_input("発行済株式ベース時価総額(円)", min_value=0.0, step=1.0, key="topix_fit_cap")
+                    fit_trading_value = st.number_input("年間売買代金(円)", min_value=0.0, step=1.0, key="topix_fit_tv")
+                    fit_segment = st.selectbox("市場区分", ["プライム", "スタンダード", "グロース"], key="topix_fit_segment")
+                    fit_percentile = st.slider("時価総額パーセンタイル(上位何%か)", 0.0, 100.0, 50.0, key="topix_fit_pct")
+                    if st.button("この内容で保存", key="topix_fit_save"):
+                        data = load_topix_fit_inputs()
+                        data[fit_ticker] = {
+                            "name": fit_name or fit_ticker,
+                            "market_cap": fit_cap or None,
+                            "annual_trading_value": fit_trading_value or None,
+                            "market_segment": fit_segment,
+                            "market_cap_percentile": fit_percentile,
+                        }
+                        save_topix_fit_inputs(data)
+                        st.success(f"{fit_ticker} の適合度入力を保存しました。")
+                else:
+                    st.info("キャッシュに銘柄データがありません。先に市場データを取得してください。")
+
+            if st.button("ランキングを更新", key="topix_rank_run"):
+                candidates = _build_topix_candidates(conn, cache, review_date, basis_date)
+                if not candidates:
+                    st.info(
+                        "候補銘柄がありません。「JPX基準適合度の入力」または「採用予想ログ」のどちらかを"
+                        "登録した銘柄だけが対象になります。"
+                    )
+                else:
+                    st.subheader("TOPIX採用候補ランキング")
+                    st.dataframe(topix_candidates_table(candidates), use_container_width=True)
+
+                    watchlist = topix_precede_watchlist(candidates)
+                    st.subheader("★ 先回り候補ウォッチリスト(採用可能性高 × 織り込み度低)")
+                    if watchlist:
+                        st.dataframe(topix_candidates_table(watchlist), use_container_width=True)
+                    else:
+                        st.info("現在、先回り候補に該当する銘柄はありません。")
+
+    with tab_forecast:
+        with st.form("topix_forecast_form"):
+            fc_ticker = st.text_input("銘柄コード")
+            fc_broker = st.text_input("証券会社名(例: 大和証券)")
+            fc_review_date = st.text_input("対象の入替回(例: 2026-10)")
+            fc_type = st.selectbox("予想区分", ["new", "exclude"], format_func=lambda v: "新規採用予想" if v == "new" else "除外予想")
+            fc_mentioned_at = st.text_input("予想が出た日(YYYY-MM-DD)")
+            fc_note = st.text_area("メモ(出典・文脈など)")
+            fc_submitted = st.form_submit_button("採用予想を登録")
+
+        if fc_submitted:
+            if not (fc_ticker and fc_broker and fc_review_date and fc_mentioned_at):
+                st.error("銘柄コード・証券会社名・対象の入替回・予想が出た日は必須です。")
+            else:
+                topix_add_forecast(
+                    conn, ticker=fc_ticker, broker=fc_broker, review_date=fc_review_date,
+                    forecast_type=fc_type, mentioned_at=fc_mentioned_at, source_note=fc_note,
+                )
+                st.success("登録しました。")
+
+        st.subheader("ログ済みの採用予想")
+        forecast_filter = st.text_input("対象の入替回で絞り込み(空欄で全件)", key="topix_forecast_filter")
+        forecasts = topix_list_forecasts(conn, review_date=forecast_filter or None)
+        if forecasts:
+            st.dataframe(topix_forecasts_table(forecasts), use_container_width=True)
+        else:
+            st.info("登録されている採用予想はありません。")
+
+    with tab_outcome:
+        with st.form("topix_outcome_form"):
+            out_ticker = st.text_input("銘柄コード", key="topix_out_ticker")
+            out_review_date = st.text_input("対象の入替回(例: 2026-10)", key="topix_out_review_date")
+            out_outcome = st.selectbox("結果", TOPIX_OUTCOME_CHOICES, key="topix_out_outcome")
+            out_announcement_date = st.text_input("発表日(YYYY-MM-DD、任意)", key="topix_out_announce")
+            out_reaction = st.number_input("発表日の株価反応(%、任意)", value=0.0, step=0.1, key="topix_out_reaction")
+            out_note = st.text_area("メモ", key="topix_out_note")
+            out_submitted = st.form_submit_button("結果を記録")
+
+        if out_submitted:
+            if not (out_ticker and out_review_date):
+                st.error("銘柄コードと対象の入替回は必須です。")
+            else:
+                topix_add_outcome(
+                    conn, ticker=out_ticker, review_date=out_review_date, outcome=out_outcome,
+                    announcement_date=out_announcement_date or None,
+                    price_reaction_pct=out_reaction if out_reaction else None, note=out_note,
+                )
+                st.success("記録しました。")
+
+        st.subheader("精度レポート(予想通り/予想外/見送りの件数)")
+        report_filter = st.text_input("対象の入替回で絞り込み(空欄で全件)", key="topix_outcome_report_filter")
+        report = topix_accuracy_report(conn, review_date=report_filter or None)
+        st.write(f"件数: {report['total']}")
+        st.table([{"結果": k, "件数": v} for k, v in report["by_outcome"].items()])
+
+        outcomes = topix_list_outcomes(conn, review_date=report_filter or None)
+        if outcomes:
+            st.subheader("記録済みの結果一覧")
+            st.dataframe(topix_outcomes_table(outcomes), use_container_width=True)
