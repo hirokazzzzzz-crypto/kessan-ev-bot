@@ -74,6 +74,22 @@ CREATE TABLE IF NOT EXISTS topix_outcomes (
     price_reaction_pct REAL,
     note TEXT NOT NULL DEFAULT ''
 );
+
+-- 底値/天井判断の材料収集(market_calls.py)。
+-- SNS(X等)や個人・証券会社の「そろそろ底/天井では」という発言を、判断せずにまず記録する。
+-- outcomeは後から振り返って埋める(発言元ごとの的中率を追えるようにするため)。
+CREATE TABLE IF NOT EXISTS market_calls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    source TEXT NOT NULL,
+    call_type TEXT NOT NULL,
+    called_at TEXT,
+    price_at_call REAL,
+    note TEXT NOT NULL DEFAULT '',
+    url TEXT NOT NULL DEFAULT '',
+    outcome TEXT NOT NULL DEFAULT '未確定'
+);
 """
 
 

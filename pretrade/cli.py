@@ -66,6 +66,13 @@ from .topix_review import (
     precede_watchlist,
 )
 from .topix_fit_store import load_fit_inputs, save_fit_inputs
+from .market_calls import CALL_TYPES, OUTCOME_CHOICES as CALL_OUTCOME_CHOICES, summarize_accuracy_by_source
+from .market_calls_db import (
+    add_call as market_add_call,
+    all_calls_as_domain,
+    list_calls as market_list_calls,
+    set_outcome as market_set_outcome,
+)
 
 
 def _prompt(label, cast=str, choices=None):
@@ -466,6 +473,57 @@ def cmd_topix_outcome_report(args):
     return 0
 
 
+def cmd_call_add(args):
+    conn = get_connection(args.db)
+    call = market_add_call(
+        conn,
+        ticker=args.ticker,
+        source=args.source,
+        call_type=args.type,
+        called_at=args.called_at,
+        price_at_call=args.price,
+        note=args.note or "",
+        url=args.url or "",
+    )
+    print(f"登録しました: id={call.id} {call.ticker} [{call.source}] {call.call_type}")
+    return 0
+
+
+def cmd_call_list(args):
+    conn = get_connection(args.db)
+    calls = market_list_calls(conn, ticker=args.ticker, source=args.source)
+    if not calls:
+        print("登録されている発言ログはありません。")
+        return 0
+    for c in calls:
+        price = f"{c.price_at_call:.0f}円" if c.price_at_call is not None else "価格不明"
+        print(f"#{c.id} {c.ticker} [{c.source}] {c.call_type} {c.called_at or '日付不明'} {price} 結果={c.outcome}")
+        if c.note:
+            print(f"    メモ: {c.note}")
+    return 0
+
+
+def cmd_call_outcome_set(args):
+    conn = get_connection(args.db)
+    call = market_set_outcome(conn, args.id, args.outcome)
+    print(f"更新しました: id={call.id} {call.ticker} [{call.source}] -> {call.outcome}")
+    return 0
+
+
+def cmd_call_accuracy_report(args):
+    conn = get_connection(args.db)
+    calls = all_calls_as_domain(conn)
+    summary = summarize_accuracy_by_source(calls)
+    if not summary:
+        print("登録されている発言ログはありません。")
+        return 0
+    print("--- 発言元ごとの的中率(的中率の高い順) ---")
+    for s in summary:
+        rate = f"{s.hit_rate_pct:.0f}%" if s.hit_rate_pct is not None else "未確定のみ"
+        print(f"  {s.source}: 的中率={rate} (的中{s.hits}/外れ{s.misses}/未確定{s.pending}, 計{s.total}件)")
+    return 0
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="売買前チェックシステム(アルファ明確化ゲート)")
     parser.add_argument("--db", default=None, help="SQLiteファイルのパス(省略時は data/pretrade.db)")
@@ -602,6 +660,35 @@ def build_parser():
     )
     p_topix_out_report.add_argument("--review-date", default=None)
     p_topix_out_report.set_defaults(func=cmd_topix_outcome_report)
+
+    p_call_add = sub.add_parser(
+        "call-add", help="底値/天井判断の材料収集: SNS等の発言をログ(判断はしない、記録のみ)"
+    )
+    p_call_add.add_argument("--ticker", required=True)
+    p_call_add.add_argument("--source", required=True, help="例: レオ, X:@leo_xxx")
+    p_call_add.add_argument("--type", dest="type", choices=CALL_TYPES, required=True)
+    p_call_add.add_argument("--called-at", default=None, help="発言日(YYYY-MM-DD、不明なら省略可)")
+    p_call_add.add_argument("--price", type=float, default=None, help="発言時点の株価")
+    p_call_add.add_argument("--note", default=None)
+    p_call_add.add_argument("--url", default=None)
+    p_call_add.set_defaults(func=cmd_call_add)
+
+    p_call_list = sub.add_parser("call-list", help="底値/天井判断の材料収集: ログ済みの発言一覧")
+    p_call_list.add_argument("--ticker", default=None)
+    p_call_list.add_argument("--source", default=None)
+    p_call_list.set_defaults(func=cmd_call_list)
+
+    p_call_outcome = sub.add_parser(
+        "call-outcome-set", help="底値/天井判断の材料収集: 発言の結果(的中/外れ)を後から記録"
+    )
+    p_call_outcome.add_argument("--id", type=int, required=True)
+    p_call_outcome.add_argument("--outcome", choices=CALL_OUTCOME_CHOICES, required=True)
+    p_call_outcome.set_defaults(func=cmd_call_outcome_set)
+
+    p_call_report = sub.add_parser(
+        "call-accuracy-report", help="底値/天井判断の材料収集: 発言元ごとの的中率レポート"
+    )
+    p_call_report.set_defaults(func=cmd_call_accuracy_report)
 
     return parser
 

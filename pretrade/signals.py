@@ -4,7 +4,12 @@
 入力は J-Quants API V2 のレスポンス形式(/fins/summary, /equities/bars/daily の
 `data` 配列の要素)をそのまま渡す想定。フィールド名はV2の略称キー
 (例: OP=営業利益, OdP=経常利益, NP=当期純利益, FOP=営業利益_予想_期末)に準拠する。
+
+トレンドライン判定(trendline_projection / check_trendline_touch)だけは、チャート上で
+手動で見つけた2点(日付・価格)を入力にする純粋な幾何計算で、J-Quantsのデータ形式には依存しない。
 """
+from dataclasses import dataclass
+from datetime import date, datetime
 from typing import Optional
 
 
@@ -150,3 +155,84 @@ def detect_trend_reversal(quotes: list, short_window: int = 5, long_window: int 
         return False
 
     return short_yesterday <= long_yesterday and short_today > long_today
+
+
+# -- トレンドライン判定(2点を結んで延長する支持線/抵抗線チェック) ---------
+# チャート上で目視で見つけた2点(例: 過去2回の安値)を結んだ直線を、任意の日付まで
+# 線形外挿する。「今の価格がこの延長線上に乗っているか」を判定するのに使う。
+
+HORIZONTAL_SLOPE_THRESHOLD_PCT_PER_DAY = 0.05  # これ未満ならほぼ水平(横ばいの支持線)とみなす
+DEFAULT_TOUCH_TOLERANCE_PCT = 2.0
+
+
+def _parse_date(value: str) -> date:
+    return datetime.strptime(value, "%Y-%m-%d").date()
+
+
+def trendline_projection(point1_date: str, point1_price: float, point2_date: str, point2_price: float,
+                          target_date: str) -> float:
+    """2点(point1_date, point1_price)-(point2_date, point2_price)を通る直線を、
+    target_date まで線形外挿したときの価格を返す。日付は "YYYY-MM-DD" 形式。
+
+    2点の日付が同じ場合は ValueError を送出する(傾きが定義できないため)。
+    """
+    d1 = _parse_date(point1_date)
+    d2 = _parse_date(point2_date)
+    dt = _parse_date(target_date)
+    days_between = (d2 - d1).days
+    if days_between == 0:
+        raise ValueError("2点の日付が同じため、直線の傾きを計算できません")
+
+    slope_per_day = (point2_price - point1_price) / days_between
+    return point1_price + slope_per_day * (dt - d1).days
+
+
+@dataclass
+class TrendlineCheck:
+    point1: tuple  # (date, price)
+    point2: tuple  # (date, price)
+    target_date: str
+    projected_price: float
+    actual_price: Optional[float]
+    deviation_pct: Optional[float]  # (actual/projected - 1) * 100
+    slope_pct_per_day: float  # 傾き(point1価格に対する1日あたりの変化率%)
+    is_roughly_horizontal: bool  # 傾きが小さい(水平に近い支持線/抵抗線)
+    is_touching: bool  # actual_price が許容誤差内で延長線に乗っているか
+
+
+def check_trendline_touch(
+    point1_date: str, point1_price: float,
+    point2_date: str, point2_price: float,
+    target_date: str,
+    actual_price: Optional[float] = None,
+    tolerance_pct: float = DEFAULT_TOUCH_TOLERANCE_PCT,
+) -> TrendlineCheck:
+    """2点を結んだ延長線上に actual_price が乗っているか(支持線/抵抗線タッチ)を判定する。
+
+    actual_price が None の場合、is_touching は常に False(判定不能)になる
+    -- "まだ検証できていない" という状態を明示的に表す。
+    """
+    projected = trendline_projection(point1_date, point1_price, point2_date, point2_price, target_date)
+
+    days_between = (_parse_date(point2_date) - _parse_date(point1_date)).days
+    slope_per_day = (point2_price - point1_price) / days_between
+    slope_pct_per_day = (slope_per_day / point1_price * 100) if point1_price else 0.0
+    is_horizontal = abs(slope_pct_per_day) < HORIZONTAL_SLOPE_THRESHOLD_PCT_PER_DAY
+
+    deviation_pct = None
+    is_touching = False
+    if actual_price is not None and projected:
+        deviation_pct = (actual_price / projected - 1) * 100
+        is_touching = abs(deviation_pct) <= tolerance_pct
+
+    return TrendlineCheck(
+        point1=(point1_date, point1_price),
+        point2=(point2_date, point2_price),
+        target_date=target_date,
+        projected_price=projected,
+        actual_price=actual_price,
+        deviation_pct=deviation_pct,
+        slope_pct_per_day=slope_pct_per_day,
+        is_roughly_horizontal=is_horizontal,
+        is_touching=is_touching,
+    )

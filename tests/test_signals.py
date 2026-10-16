@@ -1,3 +1,5 @@
+import pytest
+
 from pretrade import signals
 
 
@@ -87,3 +89,54 @@ def test_detect_trend_reversal_golden_cross():
 def test_detect_trend_reversal_false_when_flat():
     quotes = [_quote(f"2026-{(i//28)+1:02d}-{(i%28)+1:02d}", 100) for i in range(30)]
     assert signals.detect_trend_reversal(quotes, short_window=5, long_window=25) is False
+
+
+# -- トレンドライン判定 ------------------------------------------------
+# 実例(2026-10-16時点でユーザーがチャート上で確認): ソフトバンクG(9984)の過去2つの
+# 安値が4,880.0 / 4,882.0でほぼ同水準に並んでおり、その日に安値4,836で一瞬下に
+# 潜った後、+2.27%で4,962まで戻した。チャートは月単位の目盛りしか読めないため、
+# 日付は目盛りから読み取れる範囲の近似値(横ばいの線なので日付の多少のズレは
+# 結果にほぼ影響しない)。
+
+def test_check_trendline_touch_softbank_horizontal_support_example():
+    result = signals.check_trendline_touch(
+        "2026-08-10", 4880.0,
+        "2026-09-15", 4882.0,
+        target_date="2026-10-16",
+        actual_price=4836.0,  # 当日安値
+    )
+    assert result.is_roughly_horizontal is True
+    assert result.is_touching is True
+    assert result.deviation_pct == pytest.approx(-0.98, abs=0.2)
+
+
+def test_trendline_projection_simple_ascending_line():
+    # 日付の近似誤差に強い「水平線」と違い、傾きのある線は日付の精度が結果を大きく
+    # 左右するため、ここでは分かりやすいクリーンな数値で検証する。
+    projected = signals.trendline_projection(
+        "2026-01-01", 100.0, "2026-01-11", 200.0, target_date="2026-01-21"
+    )
+    # 10日で+100なら、1日あたり+10。20日後は+200。
+    assert projected == pytest.approx(300.0)
+
+
+def test_check_trendline_touch_not_touching_when_price_far_above_line():
+    result = signals.check_trendline_touch(
+        "2026-01-01", 100.0, "2026-01-11", 200.0,
+        target_date="2026-01-21", actual_price=500.0,
+    )
+    assert result.is_roughly_horizontal is False
+    assert result.is_touching is False
+    assert result.deviation_pct == pytest.approx((500 / 300 - 1) * 100)
+
+
+def test_check_trendline_touch_unknown_when_no_actual_price():
+    result = signals.check_trendline_touch("2026-01-01", 100.0, "2026-01-11", 200.0, target_date="2026-01-21")
+    assert result.actual_price is None
+    assert result.deviation_pct is None
+    assert result.is_touching is False
+
+
+def test_trendline_projection_rejects_same_date_points():
+    with pytest.raises(ValueError):
+        signals.trendline_projection("2026-01-01", 100.0, "2026-01-01", 200.0, target_date="2026-01-21")

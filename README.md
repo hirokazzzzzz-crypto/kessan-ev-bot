@@ -151,6 +151,7 @@ streamlit run app.py
 - **銘柄選定・スクリーニング(Phase2)**: スコアリング内訳の表示、未認識の好進捗スクリーナー(閾値をスライダーで調整可能)
 - **シーズナリティ・現金比率(Phase3)**: 月次騰落率・決算集中期のグラフ、メモの登録・一覧、現金比率アラート
 - **TOPIX採用予想・需給分析(Phase5)**: 採用候補ランキング・先回り候補ウォッチリスト、採用予想ログの登録・一覧、発表後の結果記録・精度レポート
+- **トレンドライン・発言ログ(Phase6)**: 2点を結んだトレンドライン判定、SNS等の底値/天井発言のログと発言元ごとの的中率
 
 サイドバーの「市場データの取得(J-Quants)」から、`fetch-data` 相当の処理をブラウザ上からも実行できる
 (認証情報は環境変数の設定が必要、Phase 2の節を参照)。
@@ -179,6 +180,8 @@ pretrade/
   topix_review.py           TOPIX採用予想・需給分析の純粋関数群(Phase5)
   topix_db.py                採用予想ログ・発表後の結果記録のDB側(Phase5)
   topix_fit_store.py         JPX適合度(近似)入力データのJSON永続化(Phase5)
+  market_calls.py            底値/天井判断の材料収集・発言元ごとの的中率集計(Phase6)
+  market_calls_db.py         発言ログのDB側(Phase6)
   cli.py                    CLIエントリポイント
 main.py                     CLI簡易起動スクリプト
 tests/                      pytestテスト一式
@@ -246,5 +249,37 @@ python main.py topix-outcome-report --review-date 2026-10
 ロジック(`topix_review.py`)は既存モジュールと同じ方針で純粋関数として実装されており、
 ネットワークアクセスを含まないため単体テストで検証できる。DB側(`topix_db.py`)とJSON入力の
 永続化(`topix_fit_store.py`)は分離している。
+
+## Phase 6: トレンドライン判定・底値/天井判断の材料収集
+
+### トレンドライン判定(`signals.py`)
+
+チャート上で目視で見つけた2点(例: 過去2回の安値)を結んだ直線を、任意の日付まで線形外挿し、
+今の価格がその延長線上に乗っているか(支持線/抵抗線タッチ)を判定する。傾きが小さければ
+「ほぼ水平な支持線」、傾きがあれば「上昇/下降トレンドライン」として区別する。
+
+```bash
+python -c "
+from pretrade.signals import check_trendline_touch
+result = check_trendline_touch('2026-08-10', 4880.0, '2026-09-15', 4882.0,
+                                target_date='2026-10-16', actual_price=4836.0)
+print(result)
+"
+```
+
+### 底値/天井判断の材料収集(`market_calls.py`)
+
+「SNS等の情報をもとに今が仕込み時か判断する」こと自体は自動化しない(自動取得できる手段もない)。
+代わりに、誰が・いつ・何を根拠に「そろそろ底/天井では」と言っていたかを**判断せずまず記録**し、
+結果が出た後に振り返って `call-outcome-set` で的中/外れを記録、発言元ごとの的中率を
+`call-accuracy-report` で追えるようにする(「レオさんは今回も当たった」を定量的に積み上げる)。
+
+```bash
+python main.py call-add --ticker 4751 --source レオ --type 底値 --called-at 2026-06-20 \
+    --price 1500 --note "優待権利落ち後にもう一段下げ→上昇を予想" --url "https://x.com/..."
+python main.py call-list
+python main.py call-outcome-set --id 1 --outcome 的中
+python main.py call-accuracy-report
+```
 
 詳細は仕様書を参照。

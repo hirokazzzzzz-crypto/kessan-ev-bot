@@ -43,6 +43,13 @@ from pretrade.scan import build_score_inputs
 from pretrade.screener import find_unrecognized_progress
 from pretrade.scoring import score_stock
 from pretrade.topix_fit_store import load_fit_inputs as load_topix_fit_inputs, save_fit_inputs as save_topix_fit_inputs
+from pretrade.market_calls import CALL_TYPES, OUTCOME_CHOICES as CALL_OUTCOME_CHOICES, summarize_accuracy_by_source
+from pretrade.market_calls_db import (
+    add_call as market_add_call,
+    all_calls_as_domain,
+    list_calls as market_list_calls,
+    set_outcome as market_set_outcome,
+)
 from pretrade.topix_db import (
     accuracy_report as topix_accuracy_report,
     add_forecast as topix_add_forecast,
@@ -91,6 +98,7 @@ with st.sidebar:
             "銘柄選定・スクリーニング(Phase2)",
             "シーズナリティ・現金比率(Phase3)",
             "TOPIX採用予想・需給分析(Phase5)",
+            "トレンドライン・発言ログ(Phase6)",
         ],
     )
 
@@ -476,3 +484,108 @@ elif page == "TOPIX採用予想・需給分析(Phase5)":
         if outcomes:
             st.subheader("記録済みの結果一覧")
             st.dataframe(topix_outcomes_table(outcomes), use_container_width=True)
+
+
+elif page == "トレンドライン・発言ログ(Phase6)":
+    st.header("Phase 6: トレンドライン判定 / 底値・天井判断の材料収集")
+    tab_trend, tab_calls = st.tabs(["トレンドライン判定", "SNS等の発言ログ"])
+
+    with tab_trend:
+        st.caption("チャート上で見つけた2点(例: 過去2回の安値)を結んだ直線を延長し、今の価格が乗っているかを判定します。")
+        col1, col2 = st.columns(2)
+        with col1:
+            p1_date = st.text_input("1点目の日付(YYYY-MM-DD)", key="trend_p1_date")
+            p1_price = st.number_input("1点目の価格", min_value=0.0, step=1.0, key="trend_p1_price")
+        with col2:
+            p2_date = st.text_input("2点目の日付(YYYY-MM-DD)", key="trend_p2_date")
+            p2_price = st.number_input("2点目の価格", min_value=0.0, step=1.0, key="trend_p2_price")
+
+        target_date = st.text_input("判定したい日付(YYYY-MM-DD)", value=date.today().isoformat(), key="trend_target")
+        actual_price = st.number_input("実際の価格(任意、空欄なら0のまま)", min_value=0.0, step=1.0, key="trend_actual")
+        tolerance = st.slider("許容誤差(%)", 0.5, 10.0, 2.0, key="trend_tolerance")
+
+        if st.button("判定する", key="trend_check"):
+            if not (p1_date and p2_date and target_date and p1_price and p2_price):
+                st.error("2点の日付・価格と、判定したい日付は必須です。")
+            else:
+                try:
+                    result = signals.check_trendline_touch(
+                        p1_date, p1_price, p2_date, p2_price, target_date,
+                        actual_price=actual_price or None, tolerance_pct=tolerance,
+                    )
+                    st.metric("延長線上の価格(予測値)", f"{result.projected_price:,.1f}")
+                    st.write(f"傾き: {result.slope_pct_per_day:+.4f}%/日" + ("(ほぼ水平)" if result.is_roughly_horizontal else "(傾きあり)"))
+                    if result.deviation_pct is not None:
+                        st.write(f"実際の価格との乖離: {result.deviation_pct:+.2f}%")
+                        if result.is_touching:
+                            st.success("延長線に乗っています(許容誤差内)。")
+                        else:
+                            st.info("延長線からは離れています。")
+                    else:
+                        st.info("実際の価格が未入力のため、乖離は判定していません(予測値のみ表示)。")
+                except ValueError as e:
+                    st.error(str(e))
+
+    with tab_calls:
+        st.caption("SNS等での「そろそろ底/天井では」という発言を、判断せずにまず記録します。後から結果を振り返って発言元ごとの的中率を追えます。")
+        with st.form("call_form"):
+            call_ticker = st.text_input("銘柄コード")
+            call_source = st.text_input("発言元(例: レオ, X:@leo_xxx)")
+            call_type = st.selectbox("種別", CALL_TYPES)
+            call_called_at = st.text_input("発言日(YYYY-MM-DD、不明なら空欄)")
+            call_price = st.number_input("発言時点の株価(任意)", min_value=0.0, step=1.0)
+            call_note = st.text_area("メモ(根拠など)")
+            call_url = st.text_input("出典URL(任意)")
+            call_submitted = st.form_submit_button("発言を記録")
+
+        if call_submitted:
+            if not (call_ticker and call_source):
+                st.error("銘柄コードと発言元は必須です。")
+            else:
+                market_add_call(
+                    conn, ticker=call_ticker, source=call_source, call_type=call_type,
+                    called_at=call_called_at or None, price_at_call=call_price or None,
+                    note=call_note, url=call_url,
+                )
+                st.success("記録しました。")
+
+        st.subheader("ログ済みの発言")
+        calls = market_list_calls(conn)
+        if calls:
+            st.dataframe(
+                [
+                    {
+                        "id": c.id, "銘柄": c.ticker, "発言元": c.source, "種別": c.call_type,
+                        "発言日": c.called_at, "発言時株価": c.price_at_call, "結果": c.outcome, "メモ": c.note,
+                    }
+                    for c in calls
+                ],
+                use_container_width=True,
+            )
+
+            with st.expander("結果を記録する"):
+                call_id = st.number_input("id", min_value=1, step=1, key="call_outcome_id")
+                outcome = st.selectbox("結果", CALL_OUTCOME_CHOICES, key="call_outcome_value")
+                if st.button("結果を更新", key="call_outcome_submit"):
+                    try:
+                        market_set_outcome(conn, int(call_id), outcome)
+                        st.success("更新しました。")
+                    except ValueError as e:
+                        st.error(str(e))
+        else:
+            st.info("登録されている発言ログはありません。")
+
+        st.subheader("発言元ごとの的中率")
+        summary = summarize_accuracy_by_source(all_calls_as_domain(conn))
+        if summary:
+            st.dataframe(
+                [
+                    {
+                        "発言元": s.source,
+                        "的中率(%)": round(s.hit_rate_pct, 0) if s.hit_rate_pct is not None else None,
+                        "的中": s.hits, "外れ": s.misses, "未確定": s.pending, "計": s.total,
+                    }
+                    for s in summary
+                ],
+                use_container_width=True,
+            )
