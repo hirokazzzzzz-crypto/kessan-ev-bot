@@ -236,3 +236,73 @@ def check_trendline_touch(
         is_roughly_horizontal=is_horizontal,
         is_touching=is_touching,
     )
+
+
+# -- ベンチマークとの連動性(相関・ベータ) ---------------------------------
+# きっかけ: アドバンテストは日経平均/TOPIXに対してかなり規則的な連動で上下しており
+# (2026年に半導体株の急落・急反発のたびにTOPIX以上に大きく動き、日経平均を
+# 単独で400〜1300pt超動かす場面が繰り返しあった)、その「ペース」を基準に他銘柄を
+# 比較すればトレードの手がかりになるのでは、というユーザーの仮説に基づく。
+# J-QuantsはTOPIXの四本値しか提供していないため、ベンチマークとしてはTOPIXを使う
+# (日経平均そのものではない点に注意)。
+
+def _returns_by_date(quotes: list) -> dict:
+    """日付 -> 前日比騰落率 の辞書を返す(前日終値が無い/ゼロの日はスキップ)。"""
+    sorted_quotes = sort_quotes(quotes)
+    closes = close_series(sorted_quotes)
+    dates = [q.get("Date") for q in sorted_quotes]
+    result = {}
+    for i in range(1, len(closes)):
+        prev, cur, d = closes[i - 1], closes[i], dates[i]
+        if prev and cur and d:
+            result[d] = cur / prev - 1
+    return result
+
+
+def compute_correlation(ticker_quotes: list, benchmark_quotes: list) -> Optional[float]:
+    """ティッカーの日次騰落率とベンチマーク(TOPIX等)の日次騰落率のピアソン相関係数。
+
+    共通する取引日が3日未満、またはどちらかの騰落率に変動が無い(分散ゼロ)場合は None。
+    """
+    a = _returns_by_date(ticker_quotes)
+    b = _returns_by_date(benchmark_quotes)
+    common_dates = sorted(set(a) & set(b))
+    if len(common_dates) < 3:
+        return None
+
+    xs = [a[d] for d in common_dates]
+    ys = [b[d] for d in common_dates]
+    n = len(xs)
+    mean_x = sum(xs) / n
+    mean_y = sum(ys) / n
+    cov = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
+    var_x = sum((x - mean_x) ** 2 for x in xs)
+    var_y = sum((y - mean_y) ** 2 for y in ys)
+    if var_x == 0 or var_y == 0:
+        return None
+    return cov / (var_x ** 0.5 * var_y ** 0.5)
+
+
+def compute_beta(ticker_quotes: list, benchmark_quotes: list) -> Optional[float]:
+    """ベンチマーク(TOPIX等)に対するベータ(回帰係数)。
+
+    ベンチマークが1%動いたとき、この銘柄が平均して何%動くかの目安。
+    1より大きければベンチマークより値動きが大きい(ハイベータ)。
+    共通する取引日が3日未満、またはベンチマークの騰落率に変動が無い場合は None。
+    """
+    a = _returns_by_date(ticker_quotes)
+    b = _returns_by_date(benchmark_quotes)
+    common_dates = sorted(set(a) & set(b))
+    if len(common_dates) < 3:
+        return None
+
+    xs = [b[d] for d in common_dates]  # 説明変数(ベンチマーク)
+    ys = [a[d] for d in common_dates]  # 目的変数(個別銘柄)
+    n = len(xs)
+    mean_x = sum(xs) / n
+    mean_y = sum(ys) / n
+    cov = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
+    var_x = sum((x - mean_x) ** 2 for x in xs)
+    if var_x == 0:
+        return None
+    return cov / var_x

@@ -140,3 +140,55 @@ def test_check_trendline_touch_unknown_when_no_actual_price():
 def test_trendline_projection_rejects_same_date_points():
     with pytest.raises(ValueError):
         signals.trendline_projection("2026-01-01", 100.0, "2026-01-01", 200.0, target_date="2026-01-21")
+
+
+# -- ベンチマークとの連動性(相関・ベータ) ---------------------------------
+
+def _price_series(closes):
+    """closes: 終値のリスト。日付は2026-01-01から1日ずつ進める簡易版。"""
+    from datetime import date, timedelta
+    base = date(2026, 1, 1)
+    return [
+        {"Date": (base + timedelta(days=i)).isoformat(), "C": str(c)}
+        for i, c in enumerate(closes)
+    ]
+
+
+def test_compute_correlation_perfectly_correlated():
+    ticker = _price_series([100, 110, 99, 115, 110])
+    # 同じ方向に動く(倍率は違ってもよい)系列を作る
+    benchmark = _price_series([1000, 1050, 945, 1060, 1010])
+    corr = signals.compute_correlation(ticker, benchmark)
+    assert corr == pytest.approx(1.0, abs=0.05)
+
+
+def test_compute_correlation_inversely_correlated():
+    ticker = _price_series([100, 110, 99, 115, 110])
+    benchmark = _price_series([1000, 950, 1050, 930, 970])
+    corr = signals.compute_correlation(ticker, benchmark)
+    assert corr < -0.8
+
+
+def test_compute_correlation_none_when_insufficient_overlap():
+    ticker = _price_series([100, 110])
+    benchmark = _price_series([1000])
+    assert signals.compute_correlation(ticker, benchmark) is None
+
+
+def test_compute_beta_double_sensitivity():
+    # ベンチマークの騰落率のちょうど2倍動く銘柄
+    benchmark = _price_series([1000, 1010, 1000, 1030, 1000])
+    bench_returns = [1010 / 1000 - 1, 1000 / 1010 - 1, 1030 / 1000 - 1, 1000 / 1030 - 1]
+    ticker_closes = [500]
+    for r in bench_returns:
+        ticker_closes.append(ticker_closes[-1] * (1 + 2 * r))
+    ticker = _price_series(ticker_closes)
+
+    beta = signals.compute_beta(ticker, benchmark)
+    assert beta == pytest.approx(2.0, abs=0.01)
+
+
+def test_compute_beta_none_when_benchmark_flat():
+    ticker = _price_series([100, 105, 103, 108])
+    benchmark = _price_series([1000, 1000, 1000, 1000])
+    assert signals.compute_beta(ticker, benchmark) is None
